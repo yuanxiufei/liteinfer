@@ -109,6 +109,26 @@ class QuotaConfig:
 
 
 @dataclass(frozen=True)
+class CacheConfig:
+    """两类缓存的预算（WBS-3.5 / 3.6）。
+
+    基线 §6.2：**两类缓存预算分开**。KV 按 token 记，张量特征按字节记，
+    两者不可互换、不可合并成一个"总缓存"。
+    `0` = 不设限。真实数字要来自实测，未实测前不得填假值。
+    """
+
+    kv_tokens: int = 0
+    tensor_bytes: int = 0
+
+    def problems(self) -> list[str]:
+        issues: list[str] = []
+        for name in ("kv_tokens", "tensor_bytes"):
+            if getattr(self, name) < 0:
+                issues.append(f"{name} 不能为负，当前 {getattr(self, name)}")
+        return issues
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     """执行侧行为。真实显存计量接入前，租约默认按声明预算记账。"""
 
@@ -143,6 +163,7 @@ class LiteInferConfig:
     service_name: str = "liteinfer"
     queue: QueueConfig = field(default_factory=QueueConfig)
     quota: QuotaConfig = field(default_factory=QuotaConfig)
+    cache: CacheConfig = field(default_factory=CacheConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
@@ -152,6 +173,7 @@ class LiteInferConfig:
             issues.append("service_name 不能为空")
         issues.extend(self.queue.problems())
         issues.extend(self.quota.problems())
+        issues.extend(self.cache.problems())
         issues.extend(self.runtime.problems())
         issues.extend(self.observability.problems())
         return issues
@@ -166,6 +188,7 @@ class LiteInferConfig:
             "service_name": self.service_name,
             "queue": _as_dict(self.queue),
             "quota": _as_dict(self.quota),
+            "cache": _as_dict(self.cache),
             "runtime": _as_dict(self.runtime),
             "observability": _as_dict(self.observability),
         }
@@ -195,11 +218,13 @@ def config_from_mapping(data: Mapping[str, Any]) -> LiteInferConfig:
 
     queue_raw = data.get("queue") or {}
     quota_raw = data.get("quota") or {}
+    cache_raw = data.get("cache") or {}
     runtime_raw = data.get("runtime") or {}
     observability_raw = data.get("observability") or {}
     for name, raw in (
         ("queue", queue_raw),
         ("quota", quota_raw),
+        ("cache", cache_raw),
         ("runtime", runtime_raw),
         ("observability", observability_raw),
     ):
@@ -210,6 +235,7 @@ def config_from_mapping(data: Mapping[str, Any]) -> LiteInferConfig:
         service_name=str(data.get("service_name") or LiteInferConfig.service_name),
         queue=_build(QueueConfig, queue_raw, section="queue"),
         quota=_build(QuotaConfig, quota_raw, section="quota"),
+        cache=_build(CacheConfig, cache_raw, section="cache"),
         runtime=_build(RuntimeConfig, runtime_raw, section="runtime"),
         observability=_build(ObservabilityConfig, observability_raw, section="observability"),
     )

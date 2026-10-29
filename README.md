@@ -78,6 +78,14 @@ finally:
 借用：只借超出基础配额的部分，借用者记入台账，租约释放时归还
 ```
 
+缓存（WBS-3.5 / 3.6，**两类预算分开**，不是物理显存硬隔离）：
+
+```text
+KV 缓存：cache.kv_tokens 预算；任务在 payload 声明 kv_tokens 才占位
+         → 预算不够在开跑前拒绝（503），终态/取消/失败一律归还
+张量特征：cache.tensor_bytes 容量 + LRU 淘汰 + pin/unpin 保护在途对象 + 有界淘汰日志
+```
+
 HTTP 契约（标准库实现，见 [ADR-0002](docs/adr/0002-http-transport-stdlib.md)）：
 
 ```text

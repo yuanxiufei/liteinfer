@@ -52,4 +52,11 @@ def test_invalid_log_level_is_rejected():
 def test_round_trip_dict():
     payload = config_from_mapping({"service_name": "svc"}).to_dict()
     assert payload["service_name"] == "svc"
-    assert set(payload) == {"service_name", "queue", "quota", "runtime", "observability"}
+    assert set(payload) == {
+        "service_name",
+        "queue",
+        "quota",
+        "cache",
+        "runtime",
+        "observability",
+    }

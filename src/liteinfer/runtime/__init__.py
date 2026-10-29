@@ -3,6 +3,7 @@
 租约是**逻辑配额**，不等于 GPU 显存硬隔离；取消只开放给声明安全点的执行器。
 """
 
+from .cache import KVCacheBudget, KVCacheStats, TensorCacheStats, TensorFeatureCache
 from .executor import (
     BlockingExecutor,
     EchoExecutor,
@@ -18,6 +19,7 @@ from .lease import (
     ResourceMeter,
     ResourceSample,
 )
+from .meter import CompositeMeter, DiskMeter, ProcMeter
 from .ports import AdapterInfo, AdapterLookup
 from .scheduler import CLASS_ORDER, TaskQueue, classify_kind
 from .service import CancelAck, TaskService
@@ -29,16 +31,23 @@ __all__ = [
     "BlockingExecutor",
     "CallbackMeter",
     "CancelAck",
+    "CompositeMeter",
+    "DiskMeter",
     "EchoExecutor",
     "ExecutionContext",
     "Executor",
     "FunctionExecutor",
+    "KVCacheBudget",
+    "KVCacheStats",
     "LeaseManager",
+    "ProcMeter",
     "ResourceLease",
     "ResourceMeter",
     "ResourceSample",
     "TaskQueue",
     "TaskService",
+    "TensorCacheStats",
+    "TensorFeatureCache",
     "classify_kind",
     "default_executor",
 ]

@@ -25,6 +25,7 @@ from .adapters.protocol import DependencySpec, describe_capabilities
 from .core import LiteInferConfig, TaskRequest
 from .core.config import config_from_mapping
 from .runtime import ExecutionContext, TaskService, default_executor
+from .runtime.meter import build_meter
 
 AdapterFactory = Callable[[], WeightVerifyAdapter]
 
@@ -81,7 +82,8 @@ def build_service(
         resolved = None
     else:
         resolved = config_from_mapping(dict(config))
-    return TaskService(resolved, executor, adapter_lookup=registry)
+    # 采样器只装当前环境真能测的那些（显存采样待 WBS-3.4 的 NVML 接入）
+    return TaskService(resolved, executor, adapter_lookup=registry, meter=build_meter())
 
 
 def weights_root_from(path: str | Path | None) -> Path | None:

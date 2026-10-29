@@ -34,8 +34,9 @@ from ..core import (
 )
 from ..core.models import TaskError
 from ..observability import MetricRegistry, get_logger, log_event
+from .cache import KVCacheBudget, TensorFeatureCache
 from .executor import ExecutionContext, Executor, default_executor
-from .lease import LeaseManager
+from .lease import LeaseManager, ResourceMeter
 from .ports import AdapterInfo, AdapterLookup
 from .scheduler import TaskQueue
 
@@ -68,14 +69,26 @@ class TaskService:
         *,
         lease_manager: LeaseManager | None = None,
         adapter_lookup: AdapterLookup | None = None,
+        kv_cache: KVCacheBudget | None = None,
+        tensor_cache: TensorFeatureCache | None = None,
+        meter: ResourceMeter | None = None,
         start_worker: bool = True,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._config = config or LiteInferConfig()
         self._config.validate()
         self._executor = executor or default_executor()
-        self._lease_manager = lease_manager or self._lease_manager_from_quota(self._config)
+        self._lease_manager = lease_manager or self._lease_manager_from_quota(
+            self._config, meter
+        )
         self._adapter_lookup = adapter_lookup
+        # 两类缓存预算分开（基线 §6.2）：KV 按 token，张量特征按字节，互不挪用
+        self._kv_cache = kv_cache or KVCacheBudget(
+            capacity_tokens=self._config.cache.kv_tokens
+        )
+        self._tensor_cache = tensor_cache or TensorFeatureCache(
+            capacity_bytes=self._config.cache.tensor_bytes
+        )
         self._clock = clock
         self._logger = get_logger("service")
         self._metrics = MetricRegistry()
@@ -101,10 +114,13 @@ class TaskService:
             self.start()
 
     @staticmethod
-    def _lease_manager_from_quota(config: LiteInferConfig) -> LeaseManager:
+    def _lease_manager_from_quota(
+        config: LiteInferConfig, meter: ResourceMeter | None = None
+    ) -> LeaseManager:
         """配额来自 `QuotaConfig`：扣掉保留空间后的容量 + 弹性借用上限。"""
         quota = config.quota
         return LeaseManager(
+            meter,
             capacity=ResourceBudget(**quota.usable()),
             borrow_limit=ResourceBudget(**quota.borrow_limit()),
         )
@@ -300,7 +316,9 @@ class TaskService:
         return depth
 
     def metrics(self) -> dict[str, Any]:
-        return self._metrics.snapshot()
+        snapshot = self._metrics.snapshot()
+        snapshot["cache"] = self.cache_stats()
+        return snapshot
 
     # ------------------------------------------------------------------ 取消 / 恢复
 
@@ -393,6 +411,7 @@ class TaskService:
             return
 
         lease = None
+        kv_tokens = 0
         try:
             with self._lock:
                 record.attempts += 1
@@ -401,6 +420,8 @@ class TaskService:
             with self._lock:
                 record.lease_id = lease.lease_id
 
+            # KV 调度许可（WBS-3.5）：预算不够就在开跑前拒绝，不许带着"也许够"的预算执行
+            kv_tokens = self._reserve_kv(record)
             context = ExecutionContext(
                 task_id=record.task_id,
                 budget=record.request.budget,
@@ -433,6 +454,8 @@ class TaskService:
         finally:
             if lease is not None and self._config.runtime.reclaim_on_terminal:
                 self._release_lease(record)
+            if kv_tokens:
+                self._kv_cache.release(kv_tokens, owner=record.task_id)
             with self._lock:
                 self._inflight -= 1
                 self._metrics.gauge("inflight").set(float(self._inflight))
@@ -443,6 +466,29 @@ class TaskService:
                 task_id=record.task_id,
                 status=record.status.value,
             )
+
+    def _reserve_kv(self, record: TaskRecord) -> int:
+        """申请 KV 缓存调度许可。声明了 `kv_tokens` 才申请；没声明就不占位。"""
+        declared = record.request.payload.get("kv_tokens", 0)
+        if not isinstance(declared, int) or isinstance(declared, bool):
+            raise invalid_argument("kv_tokens 必须是整数", task_id=record.task_id)
+        if declared <= 0:
+            return 0
+        self._kv_cache.reserve(declared, owner=record.task_id)
+        return declared
+
+    def kv_cache(self) -> KVCacheBudget:
+        return self._kv_cache
+
+    def tensor_cache(self) -> TensorFeatureCache:
+        return self._tensor_cache
+
+    def cache_stats(self) -> dict[str, Any]:
+        """两类缓存各自独立的指标（基线 §6.2：预算分开、指标分开）。"""
+        return {
+            "kv": self._kv_cache.stats().to_dict(),
+            "tensor": self._tensor_cache.stats().to_dict(),
+        }
 
     def _finish_failed(
         self, record: TaskRecord, exc: BaseException, *, status: TaskStatus

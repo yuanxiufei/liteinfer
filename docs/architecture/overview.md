@@ -54,6 +54,8 @@
 | `runtime/lease.py` | 已实现 | 逻辑配额记账；**不等于显存硬隔离** |
 | `runtime/executor.py` | 已实现 | 执行器协议 + `echo` 占位执行器 |
 | `runtime/scheduler.py` | 已实现 | 类别 > 优先级 > FIFO 出队 + 租户公平性（WBS-3.10） |
+| `runtime/cache.py` | 已实现 | 两类缓存：KV 预算与调度许可、张量特征 LRU（WBS-3.5/3.6，**非物理隔离**） |
+| `runtime/meter.py` | 部分实现 | 进程内存（Linux `/proc`）与磁盘采样；显存采样待 NVML（WBS-3.4） |
 | `runtime/service.py` | 已实现 | 队列上限、背压、幂等、取消两阶段回执、回收、并发上限 |
 | `client.py` | 已实现 | 进程内 SDK，不依赖 HTTP |
 | `api/` | 已实现 | 标准库 HTTP 服务（见 ADR-0002） |
