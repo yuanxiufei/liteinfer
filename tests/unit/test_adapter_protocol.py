@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from liteinfer.adapters import (
@@ -43,9 +45,12 @@ def test_satisfies_rejects_unparsable_clause():
         satisfies("1.0.0", "~1.0")
 
 
-def test_dependency_spec_reports_missing_modules():
+def test_dependency_spec_reports_missing_modules(
+    missing_modules: Callable[..., None],
+) -> None:
+    missing_modules("torch", "sglang")
     spec = DependencySpec(modules=("torch", "sglang"), level="L1")
-    assert spec.missing() == ["torch", "sglang"]  # 本机未安装运行时依赖
+    assert spec.missing() == ["torch", "sglang"]
 
 
 def test_dependency_spec_empty_is_always_satisfied():

@@ -1,7 +1,7 @@
 """WBS-2 端到端：注册 → 启动前门禁 → 调用 → 结果（走真实 HTTP 服务）。
 
-刻意用**本机真实状态**做门禁验证：本机没有 torch / sglang，
-所以声明依赖 L1 的 LLM 适配器必须被拒在提交阶段，而不是执行到一半才炸。
+门禁用例用 `missing_modules` 夹具显式声明「依赖不存在」，不依赖本机真实安装状态：
+宿主机装了 torch 之后，原先「本机肯定没有 torch」的断言会直接失效。
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ import hashlib
 import json
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -156,8 +157,11 @@ def test_corrupted_weights_are_reported_not_accepted(server_url: str, tmp_path: 
     assert output["checks"][0]["status"] == "hash_mismatch"
 
 
-def test_missing_dependency_is_rejected_before_execution():
-    """本机确实没装 torch / sglang，所以这条门禁是真实生效的。"""
+def test_missing_dependency_is_rejected_before_execution(
+    missing_modules: Callable[..., None],
+) -> None:
+    """门禁是否生效，不该由本机装了什么决定——这里显式隐藏 torch / sglang。"""
+    missing_modules("torch", "sglang")
     service = build_service(
         configure=lambda registry: registry.register(
             _FakeLLMAdapter(),
