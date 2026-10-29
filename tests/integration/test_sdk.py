@@ -5,11 +5,16 @@
 
 from __future__ import annotations
 
+import json
+import urllib.error
+import urllib.request
+
 import pytest
 
 from liteinfer import LiteInfer
-from liteinfer.core import ErrorCode, LiteInferError, TaskStatus
-from liteinfer.runtime import EchoExecutor
+from liteinfer.api import HttpService
+from liteinfer.core import ErrorCode, LiteInferConfig, LiteInferError, TaskStatus
+from liteinfer.runtime import EchoExecutor, TaskService
 
 pytestmark = pytest.mark.integration
 
@@ -38,6 +43,37 @@ def test_sdk_cancel_queued_task():
         ack = client.cancel(task_id)
         assert ack.accepted
         assert client.status(task_id).status in (TaskStatus.CANCELLED, TaskStatus.CANCELLING)
+
+
+def test_sdk_still_works_after_http_service_is_stopped():
+    """G1 退出条件：HTTP 服务停止不影响独立 SDK 的基本功能。
+
+    两条都要验：服务停掉后确实连不上；且此时 SDK 仍可提交、等待、取结果。
+    """
+    service = TaskService(LiteInferConfig(), EchoExecutor())
+    http = HttpService(service, port=0)
+    url = http.start()
+
+    request = urllib.request.Request(  # noqa: S310 - 本地测试端口
+        f"{url}/v1/tasks",
+        data=json.dumps({"kind": "echo"}).encode("utf-8"),
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
+        assert response.status == 201
+
+    http.stop()
+    service.close()
+
+    with pytest.raises(urllib.error.URLError):
+        urllib.request.urlopen(f"{url}/healthz", timeout=2)  # noqa: S310
+
+    with LiteInfer(executor=EchoExecutor()) as client:
+        task_id = client.submit("echo", payload={"text": "after-stop"})
+        record = client.wait(task_id, timeout_s=5.0)
+        assert record.status is TaskStatus.SUCCEEDED
+        assert client.result(task_id)["echo"] == {"text": "after-stop"}
 
 
 def test_sdk_lists_and_metrics():

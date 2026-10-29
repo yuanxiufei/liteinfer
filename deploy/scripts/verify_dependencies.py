@@ -1,6 +1,8 @@
 """WBS-0.2 依赖体检：检查已安装组件与版本，供填写 env/compatibility-matrix.md。
 
 默认只报告，不判失败；`--strict` 下缺少必需项或版本不在要求范围内才退出 1。
+另会读取 `env/candidate-lock.json`（候选 pin，未实测）与实装版本对照，
+但候选不符**不计入 problems**——未实测的 pin 不是失败依据。
 
 用法：
     python deploy/scripts/verify_dependencies.py
@@ -16,7 +18,11 @@ import platform
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CANDIDATE_LOCK = REPO_ROOT / "env" / "candidate-lock.json"
 
 MIN_PYTHON = (3, 11)
 
@@ -45,6 +51,49 @@ def _version(module: str) -> tuple[str, bool, str]:
     except Exception as exc:  # noqa: BLE001 - 体检需要收集导入失败原因
         return "import-failed", False, f"导入 {module} 失败：{exc}"
     return str(getattr(mod, "__version__", "unknown")), True, ""
+
+
+def _load_candidate() -> dict[str, Any] | None:
+    if not CANDIDATE_LOCK.exists():
+        return None
+    return json.loads(CANDIDATE_LOCK.read_text(encoding="utf-8"))
+
+
+def _match_pin(installed: str, pin: str) -> str:
+    """候选 pin 与实装版本对照；范围约束不自动比对，避免假结论。"""
+    if installed in ("not-installed", "import-failed", "unknown"):
+        return installed
+    if pin.startswith("=="):
+        return "一致" if installed == pin[2:] else f"不一致（实装 {installed}）"
+    if pin.startswith("["):  # 形如 [cu13]==0.7.2
+        exact = pin.split("==", 1)[1] if "==" in pin else None
+        return "一致" if exact and installed == exact else f"需人工核对（实装 {installed}）"
+    return f"范围约束 {pin}，需人工核对（实装 {installed}）"
+
+
+def _candidate_report(candidate: dict[str, Any] | None) -> dict[str, Any]:
+    if candidate is None:
+        return {"status": "missing", "note": f"未找到 {CANDIDATE_LOCK.name}"}
+    source = candidate.get("source", {})
+    packages = []
+    for item in candidate.get("packages", []):
+        installed, _ok, _note = _version(item["name"])
+        packages.append(
+            {
+                "name": item["name"],
+                "pin": item["pin"],
+                "installed": installed,
+                "match": _match_pin(installed, item["pin"]),
+                "purpose": item.get("purpose", ""),
+            }
+        )
+    return {
+        "status": candidate.get("status", "unknown"),
+        "source": f"{source.get('repo', '?')}@{str(source.get('commit', '?'))[:12]}",
+        "python_requires": candidate.get("python", {}).get("requires"),
+        "packages": packages,
+        "excluded": candidate.get("excluded", []),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -84,6 +133,7 @@ def main(argv: list[str] | None = None) -> int:
         "packages": packages,
         "tools": tools,
         "gpu_summary": gpu_summary,
+        "candidate": _candidate_report(_load_candidate()),
         "problems": problems,
     }
 
@@ -97,6 +147,23 @@ def main(argv: list[str] | None = None) -> int:
         for name, path in tools.items():
             print(f"  {name:<14} {path}")
         print(f"  gpu            {gpu_summary}")
+
+        candidate = payload["candidate"]
+        if candidate.get("status") == "missing":
+            print(f"  候选 pin       {candidate['note']}")
+        else:
+            print(
+                f"  候选 pin（{candidate['status']}，出处 {candidate['source']}，"
+                f"Python {candidate['python_requires']}）"
+            )
+            for item in candidate["packages"]:
+                print(
+                    f"    {item['name']:<18} pin {item['pin']:<18} 实装 {item['installed']:<14}"
+                    f" {item['match']}"
+                )
+            for item in candidate.get("excluded", []):
+                print(f"    （不装）{item['name']}：{item['reason']}")
+
         for problem in problems:
             print(f"  ! {problem}")
 

@@ -1,0 +1,58 @@
+{
+  "$schema": "liteinfer/candidate-lock/v1",
+  "status": "candidate-unverified",
+  "updated_at": "2026-10-29",
+  "note": "候选版本，全部来自 reference/ 里所拉 commit 的 pyproject.toml，尚未在正式环境实装。未实测前不得写入 runtime-versions.json，也不得写进 pyproject.toml 的运行时依赖。",
+  "source": {
+    "repo": "sglang",
+    "commit": "f2d31889258d22214d9541e40b1e1e6961ce95e7",
+    "file": "python/pyproject.toml",
+    "lock": "reference/SOURCES.lock.json"
+  },
+  "python": {
+    "requires": ">=3.11",
+    "note": "vllm 另要求 <3.15；本项目候选取 3.12（与 WSL2 ~/venvs/liteinfer 现存 3.12.3 一致，待实测）"
+  },
+  "packages": [
+    {
+      "name": "torch",
+      "pin": "==2.14.1",
+      "purpose": "训练与张量运算",
+      "note": "与 vllm 的 ==2.14.0 冲突，故 vllm 只作参考不装"
+    },
+    {
+      "name": "transformers",
+      "pin": "==5.19.0",
+      "purpose": "模型与分词器"
+    },
+    {
+      "name": "flashinfer_python",
+      "pin": "[cu13]==0.7.2",
+      "purpose": "推理内核",
+      "note": "上游注释要求与 Dockerfile 内 jit-cache 版本对齐"
+    },
+    {
+      "name": "cuda-python",
+      "pin": ">=13.0",
+      "purpose": "CUDA 绑定",
+      "note": "与宿主驱动 610.88 的 CUDA 13 匹配"
+    },
+    {
+      "name": "nvidia-cutlass-dsl",
+      "pin": "[cu13]==4.8.0",
+      "purpose": "内核编译依赖"
+    },
+    {
+      "name": "torchaudio",
+      "pin": "==2.11.0",
+      "purpose": "sglang 依赖",
+      "note": "需与 torch 2.14.1 的 ABI 一并验"
+    }
+  ],
+  "excluded": [
+    {
+      "name": "vllm",
+      "reason": "torch pin 与 sglang 冲突（==2.14.0 vs ==2.14.1）；仅作调度/背压设计的只读参考，不安装"
+    }
+  ]
+}

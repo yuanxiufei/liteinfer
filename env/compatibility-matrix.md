@@ -42,6 +42,30 @@
 | Triton | 待定 | 算子 | 版本与 PyTorch ABI | 未测 |
 | Diffusers | 仅对照实验 | 非生产训练 | 独立环境，不进生产链路 | — |
 
+### 候选组合（2026-10-29 从参考源码读出，**未实测，不得当作锁定结论**）
+
+来源是 `reference/` 里所拉 commit 的 `pyproject.toml`，commit 记在 `reference/SOURCES.lock.json`。
+机器可读真源：**`env/candidate-lock.json`**；`python deploy/scripts/verify_dependencies.py` 会读它并与实装版本对照
+（候选不符**不算失败**，未实测的 pin 不是验收依据）。
+
+| 组件 | 候选 pin | 出处 | 备注 |
+|---|---|---|---|
+| Python | `>=3.11` | sglang `f2d31889258d` | vllm 另要求 `<3.15`；本项目取 3.12（与 WSL2 `~/venvs/liteinfer` 现存 3.12.3 一致，待实测） |
+| PyTorch | `==2.14.1` | sglang `f2d31889258d` | 与 vllm 的 `==2.14.0` **冲突**，故 vllm 只作参考不装 |
+| transformers | `==5.19.0` | sglang `f2d31889258d` | |
+| flashinfer | `flashinfer_python[cu13]==0.7.2` | sglang `f2d31889258d` | 注释要求与 Dockerfile 内 jit-cache 版本对齐 |
+| cuda-python | `>=13.0` | sglang `f2d31889258d` | 与宿主驱动 610.88 的 CUDA 13 匹配 |
+| nvidia-cutlass-dsl | `[cu13]==4.8.0` | sglang `f2d31889258d` | |
+| torchaudio / torchvision | `==2.11.0` / 未钉 | sglang `f2d31889258d` | 需与 torch 2.14.1 的 ABI 一并验 |
+
+**冲突与取舍（写在这里，避免后面重复讨论）**
+
+1. sglang 与 vllm 钉的 torch 不同（2.14.1 vs 2.14.0）⇒ 二者不能同时作为依赖。
+   本项目以 **sglang 为唯一推理后端**，vllm 仅用于对照调度/背压设计（只读参考）。
+2. A5000 为 sm86，**无 FP8 Tensor Core**：sglang 的 FP8 相关路径不进本机验收范围。
+3. 以上 pin 必须在 WSL2 内实装并跑通最小用例后，才允许写进 `env/runtime-versions.json`
+   与 `uv.lock`；在此之前 `pyproject.toml` 的运行时依赖**保持为空**。
+
 ## 不得违反的口径
 
 1. 正式 GPU 验收环境为 Linux 容器 / WSL2 + 锁定镜像；Windows 主机不参与正式验收。

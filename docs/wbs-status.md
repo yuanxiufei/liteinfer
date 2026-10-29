@@ -71,8 +71,10 @@ transformers `==5.19.0`、`flashinfer_python[cu13]==0.7.2`、Python `>=3.11`；v
 
 | 命令 | 结果 |
 |---|---|
+| `python deploy/scripts/check_all.py` | 4 步全 OK（ruff / mypy / unit / integration） |
 | `pytest -m unit -q` | 42 passed |
-| `pytest -m integration -q` | 63 passed（全量） |
+| `pytest -m integration -q` | 22 passed |
+| `pytest -q`（全量） | 64 passed |
 | `ruff check .` | All checks passed |
 | `mypy`（strict） | Success: 27 source files |
 
@@ -101,10 +103,11 @@ transformers `==5.19.0`、`flashinfer_python[cu13]==0.7.2`、Python `>=3.11`；v
 
 - [x] SDK 可在 Python 进程内直接提交并查询任务。（`tests/integration/test_sdk.py`）
 - [x] CLI 和 HTTP 服务调用同一套核心领域服务。（CLI 走 HTTP 调 `TaskService`）
-- [ ] HTTP 服务停止不影响独立 SDK 的基本功能。（需补显式用例）
+- [x] HTTP 服务停止不影响独立 SDK 的基本功能。（`test_sdk_still_works_after_http_service_is_stopped`：停服后确认连不上，且 SDK 仍能提交/等待/取结果）
 - [x] 每个任务有唯一 ID、终态、错误信息及资源回收记录。（`record.to_dict()` 含 `reclaim`）
 - [x] 核心模块单元测试 100% 通过。（42 passed）
-- [ ] CI 能在每次合并请求中自动执行基础检查。（工作流已写，尚未在 runner 上实跑）
+- [ ] CI 能在每次合并请求中自动执行基础检查。（工作流已写，本地等价入口 `python deploy/scripts/check_all.py` 已跑通；
+      **尚未在任何 runner 上实跑**，也无 PR 触发记录，故不勾）
 
 ## G2 前置验收条件（适配器）
 

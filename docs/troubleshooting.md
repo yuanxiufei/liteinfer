@@ -20,6 +20,8 @@ python deploy/scripts/verify_gpu.py --json
 | 从中间 checkpoint 恢复后 loss 不一致 | 优化器状态、随机数状态或步数未完整恢复 | checkpoint 关键字段对照 | 先复跑 `tests/regression` 的恢复对照 |
 | 压力测试后主机内存不回落 | 队列无上限、取消后任务堆积 | 洪峰测试 | 检查背压与队列上限配置是否生效 |
 | 加载第三方算子后服务崩溃 | 扩展未审核、未做进程隔离 | 查看进程退出日志 | 默认禁用未审核扩展，改用独立工作进程 + 配额限制 |
+| Windows PowerShell 下 `python ... --json > out.json` 得到的文件无法解析（首字节 `0xFF`，中文乱码） | PowerShell 5.x 的 `>` 默认写 **UTF-16LE**，且管道会按控制台代码页重编码子进程输出 | `python deploy/scripts/verify_dependencies.py --json \| Out-File -Encoding utf8 out.json` | 需要落盘时用 `Out-File -Encoding utf8`，或直接读 stdout；WSL2 / Linux 下无此问题 |
+| WSL2 下 `deploy/scripts/*.sh` 报 `/bin/bash^M: bad interpreter` | 文件被转成 CRLF | `file deploy/scripts/*.sh` | 仓库已加 `.gitattributes` 统一 LF；若仍出现，用 `git add --renormalize .` 重新规范化 |
 
 ## 安全边界提醒
 
