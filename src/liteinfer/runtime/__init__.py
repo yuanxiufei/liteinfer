@@ -6,6 +6,7 @@
 from .cache import KVCacheBudget, KVCacheStats, TensorCacheStats, TensorFeatureCache
 from .executor import (
     BlockingExecutor,
+    CheckpointExecutor,
     EchoExecutor,
     ExecutionContext,
     Executor,
@@ -22,7 +23,7 @@ from .lease import (
 from .meter import CompositeMeter, DiskMeter, ProcMeter
 from .ports import AdapterInfo, AdapterLookup
 from .scheduler import CLASS_ORDER, TaskQueue, classify_kind
-from .service import CancelAck, TaskService
+from .service import CancelAck, PreemptAck, TaskService
 
 __all__ = [
     "CLASS_ORDER",
@@ -31,6 +32,7 @@ __all__ = [
     "BlockingExecutor",
     "CallbackMeter",
     "CancelAck",
+    "CheckpointExecutor",
     "CompositeMeter",
     "DiskMeter",
     "EchoExecutor",
@@ -40,6 +42,7 @@ __all__ = [
     "KVCacheBudget",
     "KVCacheStats",
     "LeaseManager",
+    "PreemptAck",
     "ProcMeter",
     "ResourceLease",
     "ResourceMeter",

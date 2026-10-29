@@ -24,6 +24,8 @@ class ErrorCode(StrEnum):
     #: 可选依赖缺失（ADR-0003 的能力分级）。不是请求错误，重试也不会自己装好依赖。
     DEPENDENCY_MISSING = "dependency_missing"
     CANCELLED = "cancelled"
+    #: 抢占（WBS-3.9）：任务停在安全点上，状态已保存。不是失败，是「还没跑完」。
+    PREEMPTED = "preempted"
     TIMEOUT = "timeout"
     BACKEND_ERROR = "backend_error"
     INTERNAL = "internal"
@@ -38,6 +40,7 @@ DEFAULT_HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.RESOURCE_EXHAUSTED: 503,
     ErrorCode.DEPENDENCY_MISSING: 503,
     ErrorCode.CANCELLED: 409,
+    ErrorCode.PREEMPTED: 409,
     ErrorCode.TIMEOUT: 504,
     ErrorCode.BACKEND_ERROR: 500,
     ErrorCode.INTERNAL: 500,
@@ -94,6 +97,24 @@ class TaskCancelled(LiteInferError):
 
     def __init__(self, message: str = "任务已取消", **details: Any) -> None:
         super().__init__(ErrorCode.CANCELLED, message, details=details, retryable=False)
+
+
+class TaskPreempted(LiteInferError):
+    """执行器在安全点交出可恢复状态、主动停下时抛出（WBS-3.9）。
+
+    `state` 是执行器自己声明的最小可恢复状态；服务端只做搬运与落盘，
+    **不解释它的内容**。没有状态就没有"续跑"这回事——那只能重新提交。
+    """
+
+    def __init__(
+        self,
+        message: str = "任务已停在安全点",
+        *,
+        state: Mapping[str, Any] | None = None,
+        **details: Any,
+    ) -> None:
+        super().__init__(ErrorCode.PREEMPTED, message, details=details, retryable=True)
+        self.state: dict[str, Any] = dict(state or {})
 
 
 def invalid_argument(message: str, **details: Any) -> LiteInferError:

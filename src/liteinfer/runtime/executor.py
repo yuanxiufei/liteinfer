@@ -19,6 +19,7 @@ from ..core import (
     LiteInferConfig,
     ResourceBudget,
     TaskCancelled,
+    TaskPreempted,
     TaskRequest,
     TaskResult,
     unsupported,
@@ -37,6 +38,10 @@ class ExecutionContext:
     cancel_event: threading.Event = field(default_factory=threading.Event)
     config: LiteInferConfig = field(default_factory=LiteInferConfig)
     logger: Any = None
+    #: 抢占请求信号（WBS-3.9）。只有声明了 `supports_preemption` 的执行器会收到置位。
+    preempt_event: threading.Event = field(default_factory=threading.Event)
+    #: 恢复执行时带回的上一次安全点状态；首次执行为 `None`。
+    resume_state: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.logger is None:
@@ -46,10 +51,24 @@ class ExecutionContext:
     def cancelled(self) -> bool:
         return self.cancel_event.is_set()
 
+    @property
+    def preempt_requested(self) -> bool:
+        return self.preempt_event.is_set()
+
     def check_cancel(self) -> None:
         """安全点检查。执行器应在可安全中止的位置主动调用。"""
         if self.cancelled:
             raise TaskCancelled("执行器在安全点检测到取消请求")
+
+    def checkpoint(self, state: Mapping[str, Any]) -> None:
+        """在安全点交出可恢复状态（WBS-3.9）。
+
+        语义只有一句：**执行器自己在安全点声明"从这儿能接着跑"**。
+        服务端不解释、不补全、不猜测 state 的内容；收到抢占请求就抛
+        `TaskPreempted` 把状态带出去。没走到安全点就没有任何状态可言。
+        """
+        if self.preempt_requested:
+            raise TaskPreempted("执行器在安全点停下", state=state)
 
 
 class Executor(Protocol):
@@ -57,6 +76,16 @@ class Executor(Protocol):
 
     @property
     def supports_cancellation(self) -> bool: ...
+
+    @property
+    def supports_preemption(self) -> bool:
+        """是否声明了安全点抢占能力（WBS-3.9）。
+
+        默认 False：**目前不对任何任务类型开放抢占**。
+        只有实现了 `checkpoint()` 安全点并能从 `context.resume_state` 续跑的执行器
+        才可以声明 True；声明了却不在安全点交状态，等于撒谎。
+        """
+        return False
 
     def execute(self, context: ExecutionContext, request: TaskRequest) -> TaskResult: ...
 
@@ -79,6 +108,10 @@ class FunctionExecutor:
     @property
     def supports_cancellation(self) -> bool:
         return self._supports_cancellation
+
+    @property
+    def supports_preemption(self) -> bool:
+        return False
 
     def kinds(self) -> list[str]:
         return sorted(self._handlers)
@@ -115,6 +148,10 @@ class EchoExecutor:
     def supports_cancellation(self) -> bool:
         return True
 
+    @property
+    def supports_preemption(self) -> bool:
+        return False
+
     def execute(self, context: ExecutionContext, request: TaskRequest) -> TaskResult:
         context.check_cancel()
         if self._sleep_s > 0:
@@ -143,6 +180,40 @@ class BlockingExecutor:
     def execute(self, context: ExecutionContext, request: TaskRequest) -> TaskResult:
         self._gate.wait(timeout=30.0)
         return TaskResult(output={"kind": request.kind}, metrics={"backend": "blocking"})
+
+
+class CheckpointExecutor:
+    """分段执行 + 安全点保存，用于打通「抢占 → 恢复」链路（WBS-3.9）。
+
+    它验证的是协议本身：**每步到安全点能交出状态、恢复后从下一步接着跑**。
+    它不是任何真实后端，也不能当作「推理/训练任务已可抢占」的证据。
+    """
+
+    def __init__(self, *, steps: int = 20, step_sleep_s: float = 0.01) -> None:
+        self._steps = steps
+        self._step_sleep_s = step_sleep_s
+
+    @property
+    def supports_cancellation(self) -> bool:
+        return True
+
+    @property
+    def supports_preemption(self) -> bool:
+        return True
+
+    def execute(self, context: ExecutionContext, request: TaskRequest) -> TaskResult:
+        total = int(request.payload.get("steps", self._steps))
+        done = int((context.resume_state or {}).get("done", 0))
+        for index in range(done, total):
+            if self._step_sleep_s > 0:
+                time.sleep(self._step_sleep_s)
+            context.check_cancel()
+            # 安全点：已完成前 index 步，从这儿能接着跑
+            context.checkpoint({"done": index})
+        return TaskResult(
+            output={"steps": total, "resumed_from": done},
+            metrics={"backend": "checkpoint", "done": total},
+        )
 
 
 def default_executor(

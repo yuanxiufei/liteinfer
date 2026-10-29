@@ -10,7 +10,7 @@ from typing import Any
 
 from ..core import LiteInferError, TaskStatus
 from ..core.models import TaskRecord
-from ..runtime import CancelAck
+from ..runtime import CancelAck, PreemptAck
 
 
 def task_response(record: TaskRecord) -> dict[str, Any]:
@@ -19,6 +19,11 @@ def task_response(record: TaskRecord) -> dict[str, Any]:
 
 def cancel_response(ack: CancelAck) -> dict[str, Any]:
     return {"cancel": ack.to_dict()}
+
+
+def preempt_response(ack: PreemptAck) -> dict[str, Any]:
+    """抢占回执。`accepted` / `completed` / `checkpoint` 分开报，不合成一个布尔。"""
+    return {"preempt": ack.to_dict()}
 
 
 def error_response(error: LiteInferError, *, request_id: str | None = None) -> dict[str, Any]:

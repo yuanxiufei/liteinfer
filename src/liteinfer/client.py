@@ -18,7 +18,7 @@ from .core import (
     config_from_mapping,
 )
 from .observability import configure_logging
-from .runtime import CancelAck, Executor, LeaseManager, TaskService
+from .runtime import CancelAck, Executor, LeaseManager, PreemptAck, TaskService
 
 
 class LiteInfer:
@@ -102,6 +102,14 @@ class LiteInfer:
 
     def cancel(self, task_id: str) -> CancelAck:
         return self._service.cancel(task_id)
+
+    def preempt(self, task_id: str) -> PreemptAck:
+        """请求抢占。执行器没声明安全点会被服务层拒绝（目前默认都不开放）。"""
+        return self._service.preempt(task_id)
+
+    def resume(self, task_id: str) -> TaskRecord:
+        """从安全点续跑。没有安全点状态的服务会拒绝，不会假装续跑。"""
+        return self._service.resume(task_id)
 
     def tasks(
         self,

@@ -180,8 +180,12 @@ class TaskRecord:
     error: TaskError | None = None
     lease_id: str | None = None
     reclaim: dict[str, Any] | None = None
+    #: 抢占落点（WBS-3.9）：执行器在安全点交出的状态 + 停下时刻 + 已抢占次数。
+    #: 没有它就谈不上"续跑"，只能重新提交。
+    preempt: dict[str, Any] | None = None
     attempts: int = 0
     cancel_requested: bool = False
+    preempt_requested: bool = False
     history: list[StateTransition] = field(default_factory=list)
     _done: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
 
@@ -226,6 +230,7 @@ class TaskRecord:
             "error": self.error.to_dict() if self.error else None,
             "lease_id": self.lease_id,
             "reclaim": self.reclaim,
+            "preempt": self.preempt,
             "attempts": self.attempts,
             "cancel_requested": self.cancel_requested,
             "needs_recovery": not self.is_terminal,

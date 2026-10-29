@@ -1,6 +1,6 @@
 """命令行入口（WBS-1.5）。
 
-命令：doctor / serve / model list / infer / task {status,cancel,list}
+命令：doctor / serve / model list / infer / task {status,cancel,preempt,resume,list}
 纪律：CLI 与 HTTP 服务调用同一套核心领域服务；`doctor` 不得伪造 GPU 结论。
 """
 
@@ -62,6 +62,14 @@ def build_parser() -> argparse.ArgumentParser:
     cancel = task_sub.add_parser("cancel", help="取消任务")
     cancel.add_argument("task_id")
     cancel.add_argument("--url", default=DEFAULT_URL)
+
+    preempt = task_sub.add_parser("preempt", help="请求抢占（仅在声明安全点的执行器上受理）")
+    preempt.add_argument("task_id")
+    preempt.add_argument("--url", default=DEFAULT_URL)
+
+    resume = task_sub.add_parser("resume", help="从安全点续跑被抢占的任务")
+    resume.add_argument("task_id")
+    resume.add_argument("--url", default=DEFAULT_URL)
 
     listing = task_sub.add_parser("list", help="列出任务")
     listing.add_argument("--url", default=DEFAULT_URL)
@@ -259,6 +267,10 @@ def cmd_task(args: argparse.Namespace) -> int:
         return 0
     if args.action == "cancel":
         payload = _request("POST", f"{args.url}/v1/tasks/{args.task_id}/cancel")
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    if args.action in ("preempt", "resume"):
+        payload = _request("POST", f"{args.url}/v1/tasks/{args.task_id}/{args.action}")
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
     if args.action == "list":

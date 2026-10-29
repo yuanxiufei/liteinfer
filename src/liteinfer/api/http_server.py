@@ -25,6 +25,7 @@ from .schemas import (
     error_response,
     health_response,
     parse_status,
+    preempt_response,
     task_response,
 )
 
@@ -140,6 +141,11 @@ class _Handler(BaseHTTPRequestHandler):
             task_id, _, action = rest.partition("/")
             if action == "cancel" and method == "POST":
                 return 202, cancel_response(service.cancel(task_id))
+            # WBS-3.9：抢占只在声明安全点的执行器上受理，否则由服务层报 CONFLICT
+            if action == "preempt" and method == "POST":
+                return 202, preempt_response(service.preempt(task_id))
+            if action == "resume" and method == "POST":
+                return 202, task_response(service.resume(task_id))
             return self._method_not_allowed(method, path)
 
         from ..core import not_found

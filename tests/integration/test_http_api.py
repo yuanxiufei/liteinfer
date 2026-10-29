@@ -127,6 +127,28 @@ def test_backpressure_returns_429_without_buffering():
         service.close()
 
 
+def test_preempt_endpoint_refuses_when_executor_declares_no_safe_point(http_service):
+    """HTTP 层不做业务判断：未声明安全点的执行器，抢占由服务层报 409。"""
+    url, _ = http_service
+    _, payload = _post(f"{url}/v1/tasks", {"kind": "echo", "payload": {"text": "hi"}})
+    task_id = payload["task"]["task_id"]
+
+    status, payload = _post_error(f"{url}/v1/tasks/{task_id}/preempt")
+    assert status == 409
+    assert payload["error"]["code"] == "conflict"
+    assert "安全点" in payload["error"]["message"]
+
+
+def test_unknown_task_action_returns_405(http_service):
+    url, _ = http_service
+    _, payload = _post(f"{url}/v1/tasks", {"kind": "echo"})
+    task_id = payload["task"]["task_id"]
+
+    status, payload = _post_error(f"{url}/v1/tasks/{task_id}/teleport")
+    assert status == 405
+    assert payload["error"]["code"] == "unsupported"
+
+
 def test_cancel_endpoint_returns_202_and_reports_two_phase_ack(http_service):
     url, _ = http_service
     _, payload = _post(f"{url}/v1/tasks", {"kind": "echo", "payload": {"text": "hi"}})

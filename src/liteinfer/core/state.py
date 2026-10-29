@@ -22,6 +22,10 @@ class TaskStatus(StrEnum):
     CANCELLED = "cancelled"
     RECLAIMING = "reclaiming"
     RECLAIMED = "reclaimed"
+    #: 抢占已受理，但执行器还没走到安全点（WBS-3.9）。
+    PREEMPTING = "preempting"
+    #: 已停在安全点、状态已保存、资源已归还，等待被恢复（WBS-3.9）。
+    PREEMPTED = "preempted"
 
 
 TERMINAL: frozenset[TaskStatus] = frozenset(
@@ -34,11 +38,15 @@ TERMINAL: frozenset[TaskStatus] = frozenset(
 )
 
 #: 进程崩溃后可能残留的状态，重启时必须显式标记恢复或回收。
+#: PREEMPTED 也在此列：任务停在安全点上，重启后必须显式恢复或回收，
+#: 不能默认它还在跑（资源其实已经还了）。
 NEEDS_RECOVERY: frozenset[TaskStatus] = frozenset(
     {
         TaskStatus.RUNNING,
         TaskStatus.CANCELLING,
         TaskStatus.RECLAIMING,
+        TaskStatus.PREEMPTING,
+        TaskStatus.PREEMPTED,
     }
 )
 
@@ -52,6 +60,27 @@ TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
             TaskStatus.SUCCEEDED,
             TaskStatus.FAILED,
             TaskStatus.CANCELLING,
+            TaskStatus.CANCELLED,
+            TaskStatus.RECLAIMING,
+            TaskStatus.PREEMPTING,
+            TaskStatus.PREEMPTED,
+        }
+    ),
+    #: 抢占请求发出后，执行器仍可能在走到安全点之前就正常跑完——所以允许 SUCCEEDED。
+    TaskStatus.PREEMPTING: frozenset(
+        {
+            TaskStatus.PREEMPTED,
+            TaskStatus.SUCCEEDED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+            TaskStatus.RECLAIMING,
+        }
+    ),
+    #: 停在安全点上：可以恢复（回到 QUEUED），也可以放弃（取消 / 失败 / 回收）。
+    TaskStatus.PREEMPTED: frozenset(
+        {
+            TaskStatus.QUEUED,
+            TaskStatus.FAILED,
             TaskStatus.CANCELLED,
             TaskStatus.RECLAIMING,
         }

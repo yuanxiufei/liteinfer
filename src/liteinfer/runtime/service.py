@@ -4,7 +4,9 @@
 1. 每个任务都有唯一 ID、明确终态、错误信息与资源回收记录；
 2. 队列满时**快速拒绝**，不允许请求被悄悄塞进后台；
 3. 客户端重试通过 `client_token` 幂等，不制造重复任务；
-4. 取消区分「已接受取消」与「已完成取消」，且只对声明支持安全点的执行器开放。
+4. 取消区分「已接受取消」与「已完成取消」，且只对声明支持安全点的执行器开放；
+5. 抢占（WBS-3.9）同理：只在执行器声明安全点时才受理，抢占后**先存状态、再还资源**，
+   没有拿到安全点状态就不许说"可续跑"。目前默认不对任何任务类型开放抢占。
 """
 
 from __future__ import annotations
@@ -20,12 +22,14 @@ from ..core import (
     LiteInferError,
     ResourceBudget,
     TaskCancelled,
+    TaskPreempted,
     TaskRecord,
     TaskRequest,
     TaskStatus,
     conflict,
     dependency_missing,
     invalid_argument,
+    is_terminal,
     not_found,
     queue_full,
     request_from_mapping,
@@ -56,6 +60,31 @@ class CancelAck:
             "accepted": self.accepted,
             "completed": self.completed,
             "status": self.status.value,
+        }
+
+
+@dataclass(frozen=True)
+class PreemptAck:
+    """抢占回执（WBS-3.9）。
+
+    与 `CancelAck` 同样口径：`accepted`（请求被受理）与 `completed`（真的停在安全点）
+    必须分开报；`checkpoint` 说明有没有拿到可恢复状态——
+    **没拿到状态就不许说成"已暂停可续跑"**。
+    """
+
+    task_id: str
+    accepted: bool
+    completed: bool
+    status: TaskStatus
+    checkpoint: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "accepted": self.accepted,
+            "completed": self.completed,
+            "status": self.status.value,
+            "checkpoint": self.checkpoint,
         }
 
 
@@ -97,6 +126,7 @@ class TaskService:
         self._records: dict[str, TaskRecord] = {}
         self._tokens: dict[str, str] = {}
         self._cancel_events: dict[str, threading.Event] = {}
+        self._preempt_events: dict[str, threading.Event] = {}
         self._queued_total = 0
         self._queued_by_kind: dict[str, int] = {}
         self._queued_by_tenant: dict[str, int] = {}
@@ -188,6 +218,7 @@ class TaskService:
                 self._queued_by_tenant.get(request.tenant, 0) + 1
             )
             self._cancel_events[record.task_id] = threading.Event()
+            self._preempt_events[record.task_id] = threading.Event()
             self._queue.push(record)
 
         self._metrics.counter("tasks.submitted").inc()
@@ -309,6 +340,10 @@ class TaskService:
             depth = {
                 "queued": self._queued_total,
                 "inflight": self._inflight,
+                # 停在安全点上等恢复的任务（WBS-3.9）：不是排队，也不是在跑
+                "preempted": sum(
+                    1 for record in self._records.values() if record.status is TaskStatus.PREEMPTED
+                ),
                 "by_kind": dict(self._queued_by_kind),
                 "by_tenant": dict(self._queued_by_tenant),
             }
@@ -364,13 +399,107 @@ class TaskService:
 
             raise conflict("当前状态不支持取消", task_id=task_id, status=status.value)
 
+    def preempt(self, task_id: str, *, timeout_s: float = 5.0) -> PreemptAck:
+        """请求抢占：只在执行器声明了安全点时受理，并等到它真的停下。
+
+        三件事分开报：请求被受理（accepted）、已停在安全点（completed）、
+        有没有拿到可恢复状态（checkpoint）。
+        """
+        record = self.get(task_id)
+        if record.is_terminal:
+            raise conflict("任务已进入终态，不能抢占", task_id=task_id, status=record.status.value)
+        if not getattr(self._executor, "supports_preemption", False):
+            raise conflict(
+                "该执行器未声明安全点抢占能力，运行中的任务不接受抢占",
+                task_id=task_id,
+                executor=type(self._executor).__name__,
+                hint="抢占只能在声明了安全点的执行器上开放（WBS-3.9）",
+            )
+
+        with self._lock:
+            status = record.status
+            if status is TaskStatus.PREEMPTED:
+                return PreemptAck(
+                    task_id, True, True, status, checkpoint=record.preempt is not None
+                )
+            if status not in (TaskStatus.RUNNING, TaskStatus.PREEMPTING):
+                raise conflict("当前状态不支持抢占", task_id=task_id, status=status.value)
+            record.preempt_requested = True
+            if status is TaskStatus.RUNNING:
+                record.transition_to(
+                    TaskStatus.PREEMPTING, reason="preempt:requested", clock=self._clock
+                )
+            event = self._preempt_events.get(task_id)
+        if event is not None:
+            event.set()
+
+        deadline = self._clock() + timeout_s
+        while self._clock() < deadline:
+            current = self.get(task_id).status
+            if current is TaskStatus.PREEMPTED:
+                self._metrics.counter("tasks.preempted").inc()
+                return PreemptAck(
+                    task_id, True, True, current, checkpoint=self.get(task_id).preempt is not None
+                )
+            if is_terminal(current):
+                # 执行器在走到安全点之前就跑完了：抢占请求来晚，就如实说没抢到
+                return PreemptAck(task_id, True, False, current, checkpoint=False)
+            time.sleep(0.01)
+        raise timed_out(
+            "等待执行器到达安全点超时",
+            task_id=task_id,
+            timeout_s=timeout_s,
+            status=self.get(task_id).status.value,
+        )
+
+    def resume(self, task_id: str) -> TaskRecord:
+        """从安全点续跑。没有状态就不许叫"续跑"——那只能重新提交。"""
+        record = self.get(task_id)
+        with self._lock:
+            if record.status is not TaskStatus.PREEMPTED:
+                raise conflict(
+                    "只有停在安全点（preempted）的任务能恢复",
+                    task_id=task_id,
+                    status=record.status.value,
+                )
+            if not record.preempt or "state" not in record.preempt:
+                raise conflict(
+                    "没有可恢复的安全点状态，不能续跑；请重新提交",
+                    task_id=task_id,
+                    hint="执行器没走到安全点就停了，此时无从恢复",
+                )
+            record.preempt_requested = False
+            self._cancel_events.setdefault(task_id, threading.Event())
+            self._preempt_events[task_id] = threading.Event()
+            request = record.request
+            record.transition_to(TaskStatus.QUEUED, reason="resume", clock=self._clock)
+            self._queued_total += 1
+            self._queued_by_kind[request.kind] = self._queued_by_kind.get(request.kind, 0) + 1
+            self._queued_by_tenant[request.tenant] = (
+                self._queued_by_tenant.get(request.tenant, 0) + 1
+            )
+            self._queue.push(record)
+
+        self._metrics.counter("tasks.resumed").inc()
+        self._metrics.gauge("queue.depth").set(float(self._queued_total))
+        log_event(self._logger, "task.resumed", task_id=task_id, status=record.status.value)
+        return record
+
+    def preempted(self) -> list[TaskRecord]:
+        """停在安全点上、等恢复的任务。"""
+        return [record for record in self.list_tasks() if record.status is TaskStatus.PREEMPTED]
+
     def mark_for_recovery(self, task_id: str) -> TaskRecord:
         """把非终态任务显式标记为「需要恢复」，不许留在 RUNNING 里装作还在跑。"""
         record = self.get(task_id)
         if record.is_terminal:
             return record
         with self._lock:
-            if record.status in (TaskStatus.RUNNING, TaskStatus.CANCELLING):
+            if record.status in (
+                TaskStatus.RUNNING,
+                TaskStatus.CANCELLING,
+                TaskStatus.PREEMPTING,
+            ):
                 record.transition_to(TaskStatus.RECLAIMING, reason="recovery", clock=self._clock)
         return record
 
@@ -427,6 +556,8 @@ class TaskService:
                 budget=record.request.budget,
                 cancel_event=self._cancel_events.get(record.task_id) or threading.Event(),
                 config=self._config,
+                preempt_event=self._preempt_events.get(record.task_id) or threading.Event(),
+                resume_state=(record.preempt or {}).get("state"),
             )
             result = self._executor.execute(context, record.request)
             with self._lock:
@@ -441,6 +572,9 @@ class TaskService:
             self._metrics.samples("task.elapsed_ms").observe(
                 float(result.metrics.get("elapsed_ms", 0.0))
             )
+        except TaskPreempted as exc:
+            # 必须排在 LiteInferError 前面：抢占不是失败，是"停在安全点等恢复"
+            self._finish_preempted(record, exc, lease)
         except TaskCancelled as exc:
             self._finish_failed(record, exc, status=TaskStatus.CANCELLED)
             self._metrics.counter("tasks.cancelled").inc()
@@ -452,7 +586,12 @@ class TaskService:
             self._finish_failed(record, exc, status=TaskStatus.FAILED)
             self._metrics.counter("tasks.failed").inc()
         finally:
-            if lease is not None and self._config.runtime.reclaim_on_terminal:
+            # lease_id 为空说明已经释放过（抢占路径会先还），不许重复释放把证据覆盖成失败
+            if (
+                lease is not None
+                and self._config.runtime.reclaim_on_terminal
+                and record.lease_id is not None
+            ):
                 self._release_lease(record)
             if kv_tokens:
                 self._kv_cache.release(kv_tokens, owner=record.task_id)
@@ -489,6 +628,33 @@ class TaskService:
             "kv": self._kv_cache.stats().to_dict(),
             "tensor": self._tensor_cache.stats().to_dict(),
         }
+
+    def _finish_preempted(
+        self, record: TaskRecord, exc: TaskPreempted, lease: object | None
+    ) -> None:
+        """停在安全点：先存状态、再还资源、最后才进 PREEMPTED。"""
+        with self._lock:
+            previous = record.preempt or {}
+            record.preempt = {
+                "state": dict(exc.state),
+                "at": self._clock(),
+                "rounds": int(previous.get("rounds", 0)) + 1,
+            }
+        if lease is not None:
+            # 抢占的意义就是腾资源，不等终态
+            self._release_lease(record)
+        with self._lock:
+            if record.status in (TaskStatus.RUNNING, TaskStatus.PREEMPTING):
+                record.transition_to(
+                    TaskStatus.PREEMPTED, reason="preempt:safepoint", clock=self._clock
+                )
+        self._metrics.counter("tasks.preempted").inc()
+        log_event(
+            self._logger,
+            "task.preempted",
+            task_id=record.task_id,
+            rounds=record.preempt["rounds"],
+        )
 
     def _finish_failed(
         self, record: TaskRecord, exc: BaseException, *, status: TaskStatus
