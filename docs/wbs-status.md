@@ -197,3 +197,4 @@ transformers `==5.19.0`、`flashinfer_python[cu13]==0.7.2`、Python `>=3.11`；v
 |---|---|---|
 | [0001](adr/0001-formal-gpu-environment-wsl2.md) | 正式 GPU 环境 = WSL2 Ubuntu-24.04；Windows 主机不参与验收；容器路线暂不启用 | accepted |
 | [0002](adr/0002-http-transport-stdlib.md) | HTTP 传输层先用标准库 `http.server`，依赖锁定前不引入 Web 框架 | accepted |
+| [0003](adr/0003-dependency-boundary.md) | 依赖边界：禁用第三方云端 API；第三方库只允许进适配器/后端层并按能力分级可选 | proposed |

@@ -85,6 +85,12 @@ liteinfer/
 不要在未运行验证前写死「某组最新版本号」。运行时依赖（Python / PyTorch / CUDA Runtime / SGLang / Triton）必须在
 `env/compatibility-matrix.md` 完成锁定后才写入 `pyproject.toml`；当前 `[project].dependencies` 故意为空。
 
+**第三方 API：禁止（硬规则）。** 推理、训练、权重加载、算子编译全部在本机完成，运行期不得发起任何外网调用；
+确需外部服务必须另开 ADR 并默认关闭。源码里唯一的 `http://` 是本机回环地址。
+**第三方库：分级可选。** 核心层（`core` / `runtime` / `observability` / `api` / `cli` / SDK）只用标准库；
+torch / sglang / peft / diffusers / triton 只能进适配器与后端层，缺哪级就关闭对应能力，不影响核心。
+见 [ADR-0003](docs/adr/0003-dependency-boundary.md)，并由 `tests/unit/test_dependency_boundary.py` 用 AST 扫描守护。
+
 Python 依赖用 `uv.lock` 锁定，容器基础镜像固定标签（GPU 镜像另记录 digest）；CUDA 扩展还需锁源码版本、编译参数、
 目标架构与构建产物哈希。
 
