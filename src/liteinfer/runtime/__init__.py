@@ -18,9 +18,12 @@ from .lease import (
     ResourceMeter,
     ResourceSample,
 )
+from .ports import AdapterInfo, AdapterLookup
 from .service import CancelAck, TaskService
 
 __all__ = [
+    "AdapterInfo",
+    "AdapterLookup",
     "BlockingExecutor",
     "CallbackMeter",
     "CancelAck",

@@ -18,9 +18,9 @@ from pathlib import Path
 from typing import Any
 
 from .. import __version__
+from ..bootstrap import build_service
 from ..core import ErrorCode, LiteInferConfig, LiteInferError, invalid_argument
 from ..core.config import config_from_mapping
-from ..runtime import TaskService, default_executor
 
 DEFAULT_URL = "http://127.0.0.1:8000"
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -156,7 +156,8 @@ def _line(ok: bool, text: str) -> None:
 
 def cmd_serve(args: argparse.Namespace) -> int:
     config = _load_config(getattr(args, "config", None))
-    service = TaskService(config, default_executor())
+    # 组合根负责装配适配器与执行器：CLI 不直接依赖适配器层（ADR-0003）
+    service = build_service(config)
     from ..api import run_server
 
     print(f"启动 HTTP 服务：{args.host}:{args.port}（Ctrl+C 停止）")

@@ -104,10 +104,13 @@ class _Handler(BaseHTTPRequestHandler):
             if method != "GET":
                 return self._method_not_allowed(method, path)
             catalog = self._srv.catalog
-            models = catalog() if catalog else []
+            models = catalog() if catalog else [item.to_dict() for item in service.adapters()]
             return 200, {
                 "models": models,
-                "note": "适配器注册中心在 WBS-2 接入；当前列表为空不代表能力已具备。",
+                "note": (
+                    "列表为空表示尚未注册适配器；ready=false 表示已注册但依赖缺失或不兼容"
+                    "（ADR-0003）。真实 LLM / SDXL 适配器待可选依赖锁定后接入。"
+                ),
             }
         if path == "/v1/metrics":
             if method != "GET":

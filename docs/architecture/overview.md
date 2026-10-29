@@ -1,6 +1,7 @@
 # 分层架构概览
 
-> 本文描述**已落地**的骨架（WBS-1），不是目标架构的全部。随 WBS-2 / 3 / 5 推进更新。
+> 本文描述**已落地**的骨架（WBS-1 + WBS-2 部分），不是目标架构的全部。随 WBS-3 / 5 推进更新。
+> 适配器与权重的细节见 [adapters-and-weights.md](adapters-and-weights.md)。
 
 ## 分层
 
@@ -17,10 +18,14 @@
 ├──────────────────────────────────────────────────────────────┤
 │ 领域层       core/    models / state / config / errors / ids   │
 ├──────────────────────────────────────────────────────────────┤
+│ 适配器层     adapters/ 协议 · 注册中心 · 兼容性                │
+│              weights/   清单校验 · 引用计数生命周期            │
+│              └── 由 bootstrap.py（组合根）装配，runtime 只认端口│
+├──────────────────────────────────────────────────────────────┤
 │ 横切         observability/  结构化日志（请求/任务 ID）+ 指标   │
 └──────────────────────────────────────────────────────────────┘
-  尚未接入（WBS-2 / 3 / 5）：adapters/ backends/ weights/ training/
-                            memory/（双缓存与 Swap）scheduler/（QoS）
+  尚未接入（WBS-3 / 5）：backends/ training/ memory/（双缓存与 Swap）
+                        scheduler/（QoS）
 ```
 
 ## 依赖方向（硬纪律）
@@ -30,6 +35,9 @@
 3. `api/` 与 `cli/` 只做协议转换：HTTP 控制器与 argparse 回调里不允许出现业务判断。
 4. 后端差异通过 `runtime/executor.py::Executor` 协议暴露，替换后端不得改动领域层。
 5. 依赖方向只允许自上而下；任何反向 import 视为缺陷。
+6. 「`core` / `runtime` / `api` / `cli` 不得 import `adapters`"由
+   `tests/unit/test_dependency_boundary.py` 与 `runtime/ports.py` 共同保证；
+   唯一例外是组合根 `bootstrap.py`，它负责装配并把适配器注入运行时。
 
 ## 模块现状
 
@@ -46,9 +54,13 @@
 | `client.py` | 已实现 | 进程内 SDK，不依赖 HTTP |
 | `api/` | 已实现 | 标准库 HTTP 服务（见 ADR-0002） |
 | `cli/` | 已实现 | doctor / serve / model list / infer / task * |
+| `adapters/` | 部分实现 | 协议 + 注册中心 + 兼容性检查（WBS-2.1/2.2/2.3）；LLM / SDXL 适配器待依赖锁定 |
+| `weights/` | 已实现 | 清单校验（损坏绝不判 ok）+ 引用计数生命周期与释放证据（WBS-2.6/2.7） |
+| `bootstrap.py` | 已实现 | 组合根：装配适配器与执行器，注入运行时端口 |
 
 ## 关键边界（不可写成别的意思）
 
 - **显存配额 ≠ 硬隔离**：若底层组件绕过 LiteInfer 的接口直接申请显存，LiteInfer 只能记账、告警和拒绝新租约。
-- **`echo` 执行器不是能力证据**：它不加载任何模型；推理能力要等 WBS-2 接入适配器后才能宣称。
+- **`echo` 执行器不是能力证据**：它不加载任何模型；推理能力要等 LLM / SDXL 适配器接入后才能宣称
+  （当前唯一可调用的真实适配器是 `weights.verify`，它只做权重校验，不做推理）。
 - **取消是两阶段**：`accepted`（已接受）与 `completed`（已完成）分开报；只对声明 `supports_cancellation` 的执行器开放运行中的取消。

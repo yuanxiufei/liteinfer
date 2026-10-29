@@ -24,16 +24,19 @@ from ..core import (
     TaskRequest,
     TaskStatus,
     conflict,
+    dependency_missing,
     invalid_argument,
     not_found,
     queue_full,
     request_from_mapping,
     timed_out,
+    unsupported,
 )
 from ..core.models import TaskError
 from ..observability import MetricRegistry, get_logger, log_event
 from .executor import ExecutionContext, Executor, default_executor
 from .lease import LeaseManager
+from .ports import AdapterInfo, AdapterLookup
 
 
 @dataclass(frozen=True)
@@ -63,6 +66,7 @@ class TaskService:
         executor: Executor | None = None,
         *,
         lease_manager: LeaseManager | None = None,
+        adapter_lookup: AdapterLookup | None = None,
         start_worker: bool = True,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -70,6 +74,7 @@ class TaskService:
         self._config.validate()
         self._executor = executor or default_executor()
         self._lease_manager = lease_manager or LeaseManager()
+        self._adapter_lookup = adapter_lookup
         self._clock = clock
         self._logger = get_logger("service")
         self._metrics = MetricRegistry()
@@ -123,6 +128,7 @@ class TaskService:
             raise invalid_argument("submit 需要 TaskRequest")
         if not request.kind.strip():
             raise invalid_argument("kind 不能为空")
+        self._preflight(request)
 
         with self._lock:
             if self._closed:
@@ -157,6 +163,40 @@ class TaskService:
             tenant=request.tenant,
         )
         return record
+
+    def _preflight(self, request: TaskRequest) -> None:
+        """启动前门禁（G2 前置验收条件）。
+
+        该 kind 只要注册了适配器，就必须在这里把「缺失依赖 / 不兼容」报出来，
+        不能等到执行到一半才发现。未注册 kind 不干预，交给执行器按 unsupported 处理。
+        """
+        lookup = self._adapter_lookup
+        if lookup is None:
+            return
+        info = lookup.find_for_kind(request.kind)
+        if info is None:
+            return
+        if info.missing_dependencies:
+            raise dependency_missing(
+                f"任务类型 {request.kind} 依赖的适配器缺少可选依赖，无法启动",
+                kind=request.kind,
+                adapter_id=info.adapter_id,
+                missing=list(info.missing_dependencies),
+                hint="按 ADR-0003 安装对应 extras 后重试",
+            )
+        if not info.ready:
+            raise unsupported(
+                f"任务类型 {request.kind} 的适配器未通过兼容性检查",
+                kind=request.kind,
+                adapter_id=info.adapter_id,
+                problems=list(info.problems),
+            )
+
+    def adapters(self) -> list[AdapterInfo]:
+        """已注册适配器快照（给 HTTP `/v1/models` 与 CLI `model list`）。"""
+        if self._adapter_lookup is None:
+            return []
+        return self._adapter_lookup.describe()
 
     def submit_mapping(self, data: Mapping[str, Any]) -> TaskRecord:
         return self.submit(request_from_mapping(data))

@@ -48,6 +48,11 @@ HTTP 服务用 `http.server`（ADR-0002），日志与指标自研。
 `core/`、`runtime/`、`api/`、`cli/`、`client.py` **不得**反向依赖它们。
 领域层只认协议（`Executor`、`资源采样接口`），不认具体实现。
 
+**唯一例外：`bootstrap.py`（组合根）。** 总得有个地方把适配器装配进运行时，
+新增接线一律放这里；`runtime` 通过 `runtime/ports.py::AdapterLookup` 端口接收，
+仍然不需要 import `adapters`。这条例外由 `tests/unit/test_dependency_boundary.py`
+的扫描范围显式排除（它只扫 `core` / `runtime` / `observability` / `api` / `cli` / `client.py`）。
+
 ### 5. 权重与模型的来源
 
 只允许本地路径，或显式配置的可信仓库；**运行期不得静默联网拉取**。

@@ -162,9 +162,11 @@ def test_wrong_method_returns_405(http_service):
     assert payload["error"]["code"] == "unsupported"
 
 
-def test_models_endpoint_is_empty_until_wbs2(http_service):
+def test_models_endpoint_lists_registered_adapters(http_service):
+    """WBS-2 接入后：`/v1/models` 必须如实反映注册中心，而不是恒为空。"""
     url, _ = http_service
     status, payload = _get(f"{url}/v1/models")
     assert status == 200
+    # 该 fixture 用的是裸 TaskService（未注入注册中心），列表为空是"尚未注册"而非"能力缺失"
     assert payload["models"] == []
-    assert "WBS-2" in payload["note"]
+    assert "尚未注册" in payload["note"]

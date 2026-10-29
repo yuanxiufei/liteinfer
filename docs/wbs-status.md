@@ -28,7 +28,7 @@
 |---|---|---|---|---|---|
 | WBS-0 技术验证与环境基线 | 第 1–2 周 | P0 | 7 | 进行中 | 0.1 硬件基线已采（`env/hardware-report.json`）；0.2 依赖未锁定，参考源码已拉、候选 pin 已成表、**待在 WSL2 实装验证**；0.3–0.7 未开始 |
 | WBS-1 工程骨架与交付形态 | 第 3–4 周 | P0 | 8 | 实现完成（待验收） | 见下方「WBS-1 落地记录」 |
-| WBS-2 模型适配器与权重管理 | 第 4–6 周 | P0 | 8 | 未开始 | 适配器协议待 WBS-0.2 锁定后端版本后落地 |
+| WBS-2 模型适配器与权重管理 | 第 4–6 周 | P0 | 8 | 部分实现（5/8） | 2.1 契约 / 2.2 注册中心 / 2.3 兼容性 / 2.6 权重清单 / 2.7 生命周期 已落地；2.4 LLM、2.5 SDXL 待 L1 依赖锁定；2.8 故障注入未开始 |
 | WBS-3 推理调度、QoS、缓存与背压 | 第 5–8 周 | P0 | 10 | 未开始 | 队列上限 / 背压 / 取消已在 WBS-1 落地最小形态 |
 | WBS-4 Swap、offload 与资源恢复 | 第 7–10 周 | P1 | 7 | 未开始 | 受限于 WSL2 无直通 NVMe（ADR-0001） |
 | WBS-5 LLM LoRA 训练闭环 | 第 9–13 周 | P0 | 9 | 未开始 | |
@@ -36,6 +36,26 @@
 | WBS-7 算子管理、故障隔离与安全边界 | 第 10–16 周 | P1 | 6 | 未开始 | |
 | WBS-8 回归、性能基线与稳定发行 | 第 17–20 周 | P0 | 9 | 未开始 | |
 | WBS-9 RAM / VRAM / SSD 协同实验（V1.1 增补） | 基础链路稳定后 4–8 周 | P0/P1/P2 混合 | 10 | 未开始 | 实验轨道，不阻塞首个可交付版本；退出条件见 G6 |
+
+## WBS-2 落地记录（2026-10-29）
+
+| 任务 | 落点 | 状态 | 证据 |
+|---|---|---|---|
+| 2.1 适配器契约 | `adapters/protocol.py`（`ModelAdapter` / `TrainingAdapter` 双协议、版本范围） | 完成 | `tests/unit/test_adapter_protocol.py` |
+| 2.2 注册中心 | `adapters/registry.py`（注册/发现/能力查询/冲突） | 完成 | `tests/unit/test_registry.py` |
+| 2.3 兼容性检查 | `adapters/compat.py` + 提交前门禁 `runtime/service.py::_preflight` | 完成 | 依赖缺失 → 503 `dependency_missing`；设备能力不足 → `unsupported` |
+| 2.4 LLM 适配器（SGLang） | — | 未开始 | 需 L1 依赖锁定（ADR-0003）；本机无 torch/sglang |
+| 2.5 SDXL 推理适配器 | — | 未开始 | 同上 |
+| 2.6 权重清单 | `weights/manifest.py` | 完成 | `tests/unit/test_weights.py`（损坏/大小不符/哈希不符/空清单） |
+| 2.7 LoRA 生命周期 | `weights/store.py`（引用计数 + `ReleaseRecord`） | 完成 | `tests/unit/test_weight_store.py` |
+| 2.8 错误恢复故障注入 | — | 未开始 | 需真实后端与故障注入环境 |
+
+**已接入的真实能力**：`weights.verify`（内置适配器，零依赖）—— 见
+`tests/integration/test_adapters_flow.py` 的端到端用例。
+**不是推理能力**：当前仍无 LLM / SDXL 适配器，`echo` 依旧只是链路占位。
+
+**依赖方向**：`runtime` 通过 `runtime/ports.py::AdapterLookup` 端口拿适配器信息，
+不 import `adapters`；装配只在组合根 `bootstrap.py`（ADR-0003 例外）。
 
 ## 参考源码（2026-10-29）
 
@@ -115,10 +135,17 @@ transformers `==5.19.0`、`flashinfer_python[cu13]==0.7.2`、Python `>=3.11`；v
 
 ## G2 前置验收条件（适配器）
 
-- [ ] 至少一个 LLM 适配器和一个 SDXL 推理适配器可注册并独立调用。
-- [ ] 非法配置、缺失依赖和不兼容版本能在任务启动前报出可读错误。
-- [ ] 损坏权重不能被误判为有效模型。
+- [ ] 至少一个 LLM 适配器和一个 SDXL 推理适配器可注册并独立调用。（**未满足**：
+      当前唯一真实适配器是零依赖的 `weights.verify`；LLM / SDXL 需 L1 依赖锁定后接入）
+- [x] 非法配置、缺失依赖和不兼容版本能在任务启动前报出可读错误。
+      （`_preflight`：依赖缺失 → 503 `dependency_missing` + 缺哪个包；
+      框架 API 不兼容 → 注册即拒；设备能力不足 → `unsupported`；
+      非法配置 → `invalid_argument`，未知字段不静默忽略）
+- [x] 损坏权重不能被误判为有效模型。（`weights/manifest.py`：大小不符 / 哈希不符 / 未知格式
+      / 缺失 / 不可读各有明确状态，**没有"大概能用"**；空清单不算通过）
 - [ ] 适配器释放后，框架可观测资源回落；不能仅以 Python 对象删除作为回收成功依据。
+      （`ReleaseRecord` 结构与"不准假装卸载成功"的口径已落地，**但真实显存回落需 NVML 采样**，
+      属 WBS-3；当前采样器未接，证据里 `sample=None`）
 
 ## G2 退出条件
 
@@ -197,4 +224,5 @@ transformers `==5.19.0`、`flashinfer_python[cu13]==0.7.2`、Python `>=3.11`；v
 |---|---|---|
 | [0001](adr/0001-formal-gpu-environment-wsl2.md) | 正式 GPU 环境 = WSL2 Ubuntu-24.04；Windows 主机不参与验收；容器路线暂不启用 | accepted |
 | [0002](adr/0002-http-transport-stdlib.md) | HTTP 传输层先用标准库 `http.server`，依赖锁定前不引入 Web 框架 | accepted |
-| [0003](adr/0003-dependency-boundary.md) | 依赖边界：禁用第三方云端 API；第三方库只允许进适配器/后端层并按能力分级可选 | proposed |
+| [0003](adr/0003-dependency-boundary.md) | 依赖边界：禁用第三方云端 API；第三方库只允许进适配器/后端层并按能力分级可选；装配只允许在组合根 `bootstrap.py` | accepted |
+| [0004](adr/0004-weight-verification-and-release-evidence.md) | 权重校验强度（清单给了哈希就必须验、没有"大概能用"）与释放证据口径（不准假装卸载成功） | accepted |

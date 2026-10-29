@@ -37,6 +37,37 @@ python -m liteinfer.cli doctor                     # 环境体检（不产出 GP
 `echo` 是占位执行器：它不加载任何模型，**不代表推理能力已具备**。
 真实后端（SGLang / 训练执行路径）在 WBS-2 / WBS-5 接入。
 
+当前唯一可调用的真实适配器是 `weights.verify`（零依赖，只做权重校验，不做推理）：
+
+```bash
+python -m liteinfer.cli model list     # 看注册中心：ready=false 表示已注册但依赖缺失/不兼容
+```
+
+```python
+from liteinfer.bootstrap import build_service
+from liteinfer.core import TaskRequest
+
+service = build_service()  # 组合根已装配好适配器与执行器
+try:
+    record = service.submit(
+        TaskRequest(
+            kind="weights.verify",
+            payload={
+                "model_id": "demo",
+                "root": "/models/demo",
+                "weights": [
+                    {"source": "model.safetensors", "format": "safetensors",
+                     "sha256": "<hex>", "size_bytes": 123}
+                ],
+            },
+        )
+    )
+    record = service.wait(record.task_id, timeout_s=10.0)
+    print(record.result.output["ok"])  # 损坏权重恒为 False，绝不"大概能用"
+finally:
+    service.close()
+```
+
 HTTP 契约（标准库实现，见 [ADR-0002](docs/adr/0002-http-transport-stdlib.md)）：
 
 ```text
@@ -71,7 +102,9 @@ liteinfer/
 | `api/` | HTTP 请求与响应（标准库） | WBS-1（已实现） |
 | `cli/` | 命令行 | WBS-1（已实现） |
 | `client.py` | 进程内 SDK | WBS-1（已实现） |
-| `adapters/` | 版本化模型适配器 | WBS-2（占位） |
+| `adapters/` | 适配器协议、注册中心、兼容性检查 | WBS-2（部分实现） |
+| `weights/` | 权重清单校验、引用计数生命周期与释放证据 | WBS-2（已实现） |
+| `bootstrap.py` | 组合根：装配适配器与执行器（唯一允许跨层装配处） | WBS-2（已实现） |
 | `backends/` | SGLang、PyTorch 等后端封装 | WBS-1/2（占位） |
 | `memory/` | 显存计量、缓存、Swap | WBS-3/4（占位） |
 | `training/` | 训练公共接口与训练器 | WBS-5/6（占位） |

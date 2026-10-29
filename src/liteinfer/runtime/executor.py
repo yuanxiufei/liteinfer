@@ -145,11 +145,16 @@ class BlockingExecutor:
         return TaskResult(output={"kind": request.kind}, metrics={"backend": "blocking"})
 
 
-def default_executor() -> FunctionExecutor:
+def default_executor(
+    extra_handlers: Mapping[str, ExecuteFn] | None = None,
+) -> FunctionExecutor:
     """骨架期默认执行器。
 
     只注册 `echo`：它不加载任何模型，仅用于打通任务链路，
     **不能**作为「推理能力已具备」的证据。
+
+    `extra_handlers` 供组合根（`bootstrap.py`）注入真实能力，
+    避免 `runtime` 反向依赖适配器层（ADR-0003）。
     """
 
     def echo(context: ExecutionContext, request: TaskRequest) -> dict[str, Any]:
@@ -159,4 +164,6 @@ def default_executor() -> FunctionExecutor:
             "metrics": {"backend": "echo"},
         }
 
-    return FunctionExecutor({"echo": echo})
+    handlers: dict[str, ExecuteFn] = {"echo": echo}
+    handlers.update(extra_handlers or {})
+    return FunctionExecutor(handlers)

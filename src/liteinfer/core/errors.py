@@ -21,6 +21,8 @@ class ErrorCode(StrEnum):
     CONFLICT = "conflict"
     QUEUE_FULL = "queue_full"
     RESOURCE_EXHAUSTED = "resource_exhausted"
+    #: 可选依赖缺失（ADR-0003 的能力分级）。不是请求错误，重试也不会自己装好依赖。
+    DEPENDENCY_MISSING = "dependency_missing"
     CANCELLED = "cancelled"
     TIMEOUT = "timeout"
     BACKEND_ERROR = "backend_error"
@@ -34,6 +36,7 @@ DEFAULT_HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.CONFLICT: 409,
     ErrorCode.QUEUE_FULL: 429,
     ErrorCode.RESOURCE_EXHAUSTED: 503,
+    ErrorCode.DEPENDENCY_MISSING: 503,
     ErrorCode.CANCELLED: 409,
     ErrorCode.TIMEOUT: 504,
     ErrorCode.BACKEND_ERROR: 500,
@@ -119,6 +122,11 @@ def resource_exhausted(message: str, **details: Any) -> LiteInferError:
 
 def timed_out(message: str, **details: Any) -> LiteInferError:
     return LiteInferError(ErrorCode.TIMEOUT, message, details=details)
+
+
+def dependency_missing(message: str, **details: Any) -> LiteInferError:
+    """可选依赖缺失。默认不可重试：重试不会把依赖变出来。"""
+    return LiteInferError(ErrorCode.DEPENDENCY_MISSING, message, details=details, retryable=False)
 
 
 def backend_error(message: str, **details: Any) -> LiteInferError:
