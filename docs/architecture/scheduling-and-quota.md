@@ -79,12 +79,32 @@ capacity=100, 已用=60, 新请求=60  ⇒  超出 20  ⇒  借用 20（不是 6
 
 **不是物理显存硬隔离**：占用值是调用方上报的**记账值**，真实显存计量要等 3.4 的 NVML。
 
-## 资源计量（3.4，部分）
+## 资源计量（3.4）
 
-`runtime/meter.py` 只接当前环境**真能测**的：进程内存（Linux `/proc` 的 `VmRSS`）与
-磁盘占用（`shutil.disk_usage`，跨平台，测的是整块盘已用字节）。采样器逐类容错：
-Windows 没有 `/proc` 就标 `unavailable`，不会把别的采样一起拖垮，也不会把"测不到"记成 0。
-**显存采样（NVML / torch）未接入**——需要 GPU 与锁定的依赖。
+三类都有真实通路，`runtime/meter.py` 按「当前环境能测什么就装什么」组装
+（`build_meter()`）：
+
+| 类别 | 采样器 | 通路 | 口径 |
+|---|---|---|---|
+| 显存（GPU） | `NvmlMeter` | `pynvml` → 否则 `nvidia-smi --query-gpu=memory.used` | **整卡已用**显存，多卡取最大值 |
+| 内存（CPU） | `ProcMeter` | Linux `/proc` VmRSS · Windows `psapi.GetProcessMemoryInfo` · macOS `resource` | 本进程常驻内存 |
+| 磁盘（SSD） | `DiskMeter` | `shutil.disk_usage` | **整块盘**已用字节 |
+
+三条纪律：
+
+- **只报真测到的**：缺硬件或缺依赖 → `supported=False`，样本 `source` 标 `unavailable`，
+  报告里 `measured=False`。**「没有数据」和「测得 0」必须能区分**，不许拿 0 填空。
+- **三类分开记、分开报，不相加**：`CompositeMeter.report()` 逐类给
+  `{bytes, source, measured}`；`/v1/resources` 与 `metrics()` 都按这个形状暴露。
+- **逐类容错**：GPU 测不到不会把内存和磁盘一起拖垮，失败记在 `failures` 上。
+
+没做的：本进程显存占用（要 `nvmlDeviceGetComputeRunningProcesses`，依赖锁定后再接）、
+GPU 利用率、按卡拆分。
+
+实测（本机 Windows + RTX A5000，驱动 610.88）：三类同时出数
+`vram 1.05 GiB / ram 26.6 MB / ssd 1.75 TB`，来源
+`nvml:nvidia-smi+win:WorkingSetSize+disk_usage`。
+正式环境的 GPU 验收仍按 ADR-0001 在 WSL2 上做（Windows 主机不参与正式验收）。
 
 ## 已落地与未落地
 
@@ -93,7 +113,7 @@ Windows 没有 `/proc` 就标 `unavailable`，不会把别的采样一起拖垮�
 | 3.1 队列上限 | 已完成（WBS-1） | 全局 / kind / tenant 三档，超限 429 且不进后台 |
 | 3.2 背压与限流 | 已完成（WBS-1） | 快速拒绝 + 稳定错误码 |
 | 3.3 静态配额 | **本轮完成** | 预算 / 保留空间 / 并发上限入配置并生效 |
-| 3.4 资源计量 | 部分落地 | 进程内存（Linux `/proc`）与磁盘占用已接；**显存采样（NVML）未接**，需 GPU |
+| 3.4 资源计量 | **本轮完成（三类通路）** | 显存（pynvml / nvidia-smi）· 内存（Linux /proc、Windows psapi、macOS resource）· 磁盘（disk_usage）都能跑；测不到标 `measured=False`；正式 GPU 验收仍在 WSL2 做 |
 | 3.5 KV 缓存配额 | **本轮完成** | 预算 + token 统计 + 调度许可 + 归还台账；后端真实缓存块仍由后端自己管 |
 | 3.6 张量特征缓存 | **本轮完成** | 容量上限 + LRU + pin/unpin + 淘汰回调与有界淘汰日志 |
 | 3.7 资源租约 | 已完成（WBS-1） | 本轮加了借用台账 |

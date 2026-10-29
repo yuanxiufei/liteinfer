@@ -5,9 +5,12 @@
 """
 
 from .config import (
+    CacheConfig,
     LiteInferConfig,
     ObservabilityConfig,
+    PreemptionConfig,
     QueueConfig,
+    QuotaConfig,
     RuntimeConfig,
     config_from_mapping,
 )
@@ -54,6 +57,7 @@ from .state import (
 
 __all__ = [
     "AdapterRef",
+    "CacheConfig",
     "DEFAULT_HTTP_STATUS",
     "ErrorCode",
     "LiteInferConfig",
@@ -61,7 +65,9 @@ __all__ = [
     "ModelRef",
     "NEEDS_RECOVERY",
     "ObservabilityConfig",
+    "PreemptionConfig",
     "QueueConfig",
+    "QuotaConfig",
     "RETRYABLE",
     "ResourceBudget",
     "RuntimeConfig",

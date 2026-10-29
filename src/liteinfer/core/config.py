@@ -129,6 +129,80 @@ class CacheConfig:
 
 
 @dataclass(frozen=True)
+class PreemptionConfig:
+    """安全抢占策略（WBS-3.9 / G2）。
+
+    开放的门槛不是「执行器说自己行」，而是 G2 的原话：
+    **只对已实现并通过恢复测试的任务类型开放**。因此：
+
+    - `verified_kinds` 是准入台账：登记了才可能被抢占；
+    - `verification` 是台账凭据：登记时必须写出让它获得资格的**恢复测试**，
+      空口声称"支持抢占"不算通过；登记了却拿不出凭据属于配置错误；
+    - 两者默认都为空 ⇒ **默认不对任何任务类型开放**，沿用既有口径。
+
+    `max_rounds` 防止同一个任务被反复抢占而永远跑不完（抢占本身也会制造饥饿）；
+    `auto` 允许资源不足时按优先级主动挑 victim，但要求至少两个 worker——
+    单 worker 时 victim 就在等资源的那个线程上，等它到安全点是死锁。
+    """
+
+    enabled: bool = False
+    #: 已实现并通过恢复测试、允许被抢占的 kind
+    verified_kinds: tuple[str, ...] = ()
+    #: kind → 恢复测试证据（测试 id / 命令），必须与 `verified_kinds` 一一对应
+    verification: dict[str, str] = field(default_factory=dict)
+    #: 同一任务最多被抢占几次；用尽即转为不可抢占
+    max_rounds: int = 3
+    #: 自动抢占时，请求者优先级至少高出 victim 多少
+    min_priority_gap: int = 1
+    auto: bool = False
+    wait_timeout_s: float = 5.0
+
+    def problems(self) -> list[str]:
+        issues: list[str] = []
+        if self.max_rounds < 1:
+            issues.append(f"max_rounds 必须 >= 1，当前 {self.max_rounds}")
+        if self.min_priority_gap < 0:
+            issues.append(f"min_priority_gap 不能为负，当前 {self.min_priority_gap}")
+        if self.wait_timeout_s <= 0:
+            issues.append(f"wait_timeout_s 必须 > 0，当前 {self.wait_timeout_s}")
+        for kind in self.verified_kinds:
+            if not kind.strip():
+                issues.append("verified_kinds 里不允许出现空字符串")
+                continue
+            if not (self.verification.get(kind) or "").strip():
+                issues.append(
+                    f"verified_kinds 里的 {kind} 没有取证依据："
+                    f"必须在 verification 中登记它通过了哪项恢复测试"
+                )
+        for kind in self.verification:
+            if kind not in self.verified_kinds:
+                issues.append(
+                    f"verification 里的 {kind} 不在 verified_kinds 中，"
+                    f"拒绝挂空凭据（要么登记此类型，要么删掉这条证据）"
+                )
+        return issues
+
+    def eligible(self, kind: str) -> bool:
+        """该 kind 是否已登记为「实现并通过恢复测试」且抢占总开关已开。"""
+        return self.enabled and kind in self.verified_kinds
+
+    def evidence_of(self, kind: str) -> str:
+        """返回该 kind 的恢复测试证据；没有就是空串，不许拿别的类型顶替。"""
+        return self.verification.get(kind) or ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "verified_kinds": list(self.verified_kinds),
+            "verification": dict(self.verification),
+            "max_rounds": self.max_rounds,
+            "min_priority_gap": self.min_priority_gap,
+            "auto": self.auto,
+            "wait_timeout_s": self.wait_timeout_s,
+        }
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     """执行侧行为。真实显存计量接入前，租约默认按声明预算记账。"""
 
@@ -164,6 +238,7 @@ class LiteInferConfig:
     queue: QueueConfig = field(default_factory=QueueConfig)
     quota: QuotaConfig = field(default_factory=QuotaConfig)
     cache: CacheConfig = field(default_factory=CacheConfig)
+    preempt: PreemptionConfig = field(default_factory=PreemptionConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
@@ -174,8 +249,21 @@ class LiteInferConfig:
         issues.extend(self.queue.problems())
         issues.extend(self.quota.problems())
         issues.extend(self.cache.problems())
+        issues.extend(self.preempt.problems())
         issues.extend(self.runtime.problems())
         issues.extend(self.observability.problems())
+        issues.extend(self._cross_section_problems())
+        return issues
+
+    def _cross_section_problems(self) -> list[str]:
+        """跨配置段的组合校验：单段都合法、拼起来会出事的，必须在这里拦住。"""
+        issues: list[str] = []
+        if self.preempt.enabled and self.preempt.auto and self.queue.max_inflight < 2:
+            issues.append(
+                "preempt.auto 要求 queue.max_inflight >= 2，当前 "
+                f"{self.queue.max_inflight}：单 worker 时 victim 就在等待资源的那个线程上，"
+                f"等它走到安全点必然死锁"
+            )
         return issues
 
     def validate(self) -> None:
@@ -189,6 +277,7 @@ class LiteInferConfig:
             "queue": _as_dict(self.queue),
             "quota": _as_dict(self.quota),
             "cache": _as_dict(self.cache),
+            "preempt": self.preempt.to_dict(),
             "runtime": _as_dict(self.runtime),
             "observability": _as_dict(self.observability),
         }
@@ -219,12 +308,14 @@ def config_from_mapping(data: Mapping[str, Any]) -> LiteInferConfig:
     queue_raw = data.get("queue") or {}
     quota_raw = data.get("quota") or {}
     cache_raw = data.get("cache") or {}
+    preempt_raw = data.get("preempt") or {}
     runtime_raw = data.get("runtime") or {}
     observability_raw = data.get("observability") or {}
     for name, raw in (
         ("queue", queue_raw),
         ("quota", quota_raw),
         ("cache", cache_raw),
+        ("preempt", preempt_raw),
         ("runtime", runtime_raw),
         ("observability", observability_raw),
     ):
@@ -236,6 +327,7 @@ def config_from_mapping(data: Mapping[str, Any]) -> LiteInferConfig:
         queue=_build(QueueConfig, queue_raw, section="queue"),
         quota=_build(QuotaConfig, quota_raw, section="quota"),
         cache=_build(CacheConfig, cache_raw, section="cache"),
+        preempt=_build(PreemptionConfig, preempt_raw, section="preempt"),
         runtime=_build(RuntimeConfig, runtime_raw, section="runtime"),
         observability=_build(ObservabilityConfig, observability_raw, section="observability"),
     )

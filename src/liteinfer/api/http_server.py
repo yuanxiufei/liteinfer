@@ -26,6 +26,7 @@ from .schemas import (
     health_response,
     parse_status,
     preempt_response,
+    resource_response,
     task_response,
 )
 
@@ -113,6 +114,10 @@ class _Handler(BaseHTTPRequestHandler):
                     "（ADR-0003）。真实 LLM / SDXL 适配器待可选依赖锁定后接入。"
                 ),
             }
+        if path == "/v1/resources":
+            if method != "GET":
+                return self._method_not_allowed(method, path)
+            return 200, resource_response(service.resource_sample())
         if path == "/v1/metrics":
             if method != "GET":
                 return self._method_not_allowed(method, path)

@@ -44,6 +44,27 @@ def test_invalid_limit_is_rejected():
     assert any("max_queued" in issue for issue in excinfo.value.details["issues"])
 
 
+def test_preempt_registration_without_evidence_is_rejected():
+    """G2 门槛：登记了一个 kind 就必须写出它通过了哪项恢复测试，空口声称不算。"""
+    with pytest.raises(LiteInferError) as excinfo:
+        config_from_mapping({"preempt": {"enabled": True, "verified_kinds": ["infer"]}})
+    assert excinfo.value.code is ErrorCode.INVALID_ARGUMENT
+    assert any("infer" in issue for issue in excinfo.value.details["issues"])
+
+
+def test_preempt_auto_requires_two_workers():
+    """单 worker 时自动抢占会死锁：victim 就在等资源的那个线程上。"""
+    with pytest.raises(LiteInferError) as excinfo:
+        config_from_mapping(
+            {
+                "preempt": {"enabled": True, "auto": True},
+                "queue": {"max_inflight": 1},
+            }
+        )
+    assert excinfo.value.code is ErrorCode.INVALID_ARGUMENT
+    assert any("max_inflight" in issue for issue in excinfo.value.details["issues"])
+
+
 def test_invalid_log_level_is_rejected():
     with pytest.raises(LiteInferError):
         config_from_mapping({"observability": {"level": "VERBOSE"}})
@@ -59,4 +80,5 @@ def test_round_trip_dict():
         "cache",
         "runtime",
         "observability",
+        "preempt",
     }

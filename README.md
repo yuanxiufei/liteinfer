@@ -86,6 +86,15 @@ KV 缓存：cache.kv_tokens 预算；任务在 payload 声明 kv_tokens 才占�
 张量特征：cache.tensor_bytes 容量 + LRU 淘汰 + pin/unpin 保护在途对象 + 有界淘汰日志
 ```
 
+资源计量（WBS-3.4，**三类都能跑**：显存 / 内存 / 磁盘）：
+
+```text
+显存：pynvml → 否则 nvidia-smi（整卡已用，多卡取最大）
+内存：Linux /proc VmRSS · Windows psapi · macOS resource
+磁盘：shutil.disk_usage（整块盘已用字节）
+查：GET /v1/resources 或 liteinfer doctor（三类分开报，测不到标 measured=False）
+```
+
 安全抢占（WBS-3.9，**目前不对任何任务类型开放**）：
 
 ```text

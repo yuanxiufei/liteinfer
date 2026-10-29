@@ -26,6 +26,14 @@ def preempt_response(ack: PreemptAck) -> dict[str, Any]:
     return {"preempt": ack.to_dict()}
 
 
+def resource_response(payload: dict[str, Any]) -> dict[str, Any]:
+    """资源采样回执：三类分开（`resources` 每类带 `measured`），另附原始 `sample`。
+
+    没测到的类 `measured=False`——「没有数据」不许写成「测得 0」。
+    """
+    return {"resources": payload["resources"], "sample": payload["sample"]}
+
+
 def error_response(error: LiteInferError, *, request_id: str | None = None) -> dict[str, Any]:
     body: dict[str, Any] = {"error": error.to_dict()}
     if request_id:

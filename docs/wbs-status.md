@@ -29,7 +29,7 @@
 | WBS-0 技术验证与环境基线 | 第 1–2 周 | P0 | 7 | 进行中 | 0.1 硬件基线已采（`env/hardware-report.json`）；0.2 依赖未锁定，参考源码已拉、候选 pin 已成表、**待在 WSL2 实装验证**；0.3–0.7 未开始 |
 | WBS-1 工程骨架与交付形态 | 第 3–4 周 | P0 | 8 | 实现完成（待验收） | 见下方「WBS-1 落地记录」 |
 | WBS-2 模型适配器与权重管理 | 第 4–6 周 | P0 | 8 | 部分实现（5/8） | 2.1 契约 / 2.2 注册中心 / 2.3 兼容性 / 2.6 权重清单 / 2.7 生命周期 已落地；2.4 LLM、2.5 SDXL 待 L1 依赖锁定；2.8 故障注入未开始 |
-| WBS-3 推理调度、QoS、缓存与背压 | 第 5–8 周 | P0 | 10 | 部分实现（9/10） | 3.1/3.2/3.7 在 WBS-1；3.3 静态配额、3.8 弹性借用、3.10 优先级调度已落地；3.5/3.6 两类缓存已落地；3.9 安全抢占已落地（默认不开放）；3.4 只接了非 GPU 采样（显存待 NVML） |
+| WBS-3 推理调度、QoS、缓存与背压 | 第 5–8 周 | P0 | 10 | 实现完成（10/10，待验收） | 3.1/3.2/3.7 在 WBS-1；3.3 静态配额、3.8 弹性借用、3.10 优先级调度已落地；3.5/3.6 两类缓存已落地；3.9 安全抢占已落地（默认不开放）；3.4 三类采样（显存/内存/磁盘）都已接通。仍未做：60 分钟长跑与固定负载压测（G 类条目需 GPU 环境） |
 | WBS-4 Swap、offload 与资源恢复 | 第 7–10 周 | P1 | 7 | 未开始 | 受限于 WSL2 无直通 NVMe（ADR-0001） |
 | WBS-5 LLM LoRA 训练闭环 | 第 9–13 周 | P0 | 9 | 未开始 | |
 | WBS-6 扩散训练与统一训练抽象层 | 第 14–16 周 | P1 | 8 | 未开始 | |
@@ -154,7 +154,7 @@ transformers `==5.19.0`、`flashinfer_python[cu13]==0.7.2`、Python `>=3.11`；v
 | 3.1 队列上限 | `core/config.py::QueueConfig`（WBS-1 已有） | 完成 | 全局 / kind / tenant 三档，超限 429 且不进后台 |
 | 3.2 背压与限流 | `runtime/service.py::_check_backpressure`（WBS-1 已有） | 完成 | 快速拒绝 + 稳定错误码 |
 | 3.3 静态配额 | 新增 `core/config.py::QuotaConfig`（预算 / 保留空间 / 并发上限） | 完成 | `tests/unit/test_quota.py`；**并修掉 `max_inflight` 只计数不生效的缺陷**（现为 worker 数） |
-| 3.4 资源计量 | `runtime/meter.py`（`ProcMeter` / `DiskMeter` / `CompositeMeter`） | 部分 | 进程内存（Linux `/proc` 的 VmRSS）与磁盘占用已接；**显存采样（NVML）未接**，需 GPU；测不到标 `unavailable`，不记成 0 |
+| 3.4 资源计量 | `runtime/meter.py`（`NvmlMeter` / `ProcMeter` / `DiskMeter` / `CompositeMeter`） | 完成（三类通路） | 显存：`pynvml` → 回落 `nvidia-smi`（整卡已用，多卡取最大）；内存：Linux `/proc` VmRSS / Windows `psapi` / macOS `resource`；磁盘：`disk_usage`（整块盘）。测不到标 `measured=False`，绝不拿 0 冒充。本机 A5000 实测三类同时出数；正式 GPU 验收仍在 WSL2（ADR-0001）。未做：本进程显存占用、GPU 利用率、按卡拆分 |
 | 3.5 KV 缓存配额 | `runtime/cache.py::KVCacheBudget` + `service._reserve_kv` | 完成 | 预算/token 统计/调度许可/归还台账；并发下预算不足在**开跑前**拒绝（503），终态与取消均归还 |
 | 3.6 张量特征缓存 | `runtime/cache.py::TensorFeatureCache` | 完成 | 容量上限 + LRU + pin/unpin + 淘汰回调 + 有界淘汰日志；装不下先淘汰自己，剩的都被 pin 住就拒绝并回滚 put |
 | 3.7 资源租约 | `runtime/lease.py`（WBS-1 已有） | 完成 | 本轮新增借用台账 `borrowers()` |

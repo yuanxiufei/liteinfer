@@ -21,6 +21,7 @@ from .. import __version__
 from ..bootstrap import build_service
 from ..core import ErrorCode, LiteInferConfig, LiteInferError, invalid_argument
 from ..core.config import config_from_mapping
+from ..runtime import build_meter
 
 DEFAULT_URL = "http://127.0.0.1:8000"
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -152,6 +153,15 @@ def cmd_doctor() -> int:
         print("  [INFO] 请用 deploy/scripts/verify_gpu.py 在正式环境采集")
 
     print("  [INFO] 依赖组合尚未锁定（WBS-0.2）：运行时依赖保持为空是有意为之")
+
+    print("资源采样（WBS-3.4：三类分开报，测不到就说测不到）")
+    report = build_meter(disk_path=REPO_ROOT).report()
+    for kind, label in (("vram", "显存"), ("ram", "内存"), ("ssd", "磁盘")):
+        info = report[kind]
+        if info["measured"]:
+            _line(True, f"{label}采样：{info['bytes']} 字节（来源 {info['source']}）")
+        else:
+            print(f"  [INFO] {label}采样：本进程没测到（{info['source']}），不作为结论")
     return 0
 
 

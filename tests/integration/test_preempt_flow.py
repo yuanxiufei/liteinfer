@@ -8,15 +8,37 @@ import pytest
 
 from liteinfer.core import ErrorCode, TaskRequest, TaskStatus
 from liteinfer.core.config import config_from_mapping
-from liteinfer.runtime import CheckpointExecutor, EchoExecutor, TaskService
+from liteinfer.runtime import CheckpointExecutor, TaskService
 
 pytestmark = pytest.mark.integration
 
 
+#: `checkpoint` 是这里唯一取得「已实现并通过恢复测试」资格的 kind——见 `verification`。
+#: 台账为空时服务不对任何类型开放抢占，所以必须显式登记，且登记就要写取证路径。
+PREEMPT_POLICY: dict[str, object] = {
+    "enabled": True,
+    "verified_kinds": ["checkpoint"],
+    "verification": {
+        "checkpoint": (
+            "tests/integration/test_preempt_flow.py::"
+            "test_preempt_stops_at_safe_point_and_can_resume"
+        )
+    },
+}
+
+
 def _running_service(
-    executor: object, *, start_worker: bool = True, **cache_kwargs: object
+    executor: object,
+    *,
+    start_worker: bool = True,
+    preempt: dict[str, object] | None = None,
+    **cache_kwargs: object,
 ) -> TaskService:
-    config = {"cache": cache_kwargs} if cache_kwargs else {}
+    """默认带准入台账 `PREEMPT_POLICY`；传 `{}` 表示不开放任何抢占。"""
+    policy: dict[str, object] = PREEMPT_POLICY if preempt is None else preempt
+    config: dict[str, object] = {"preempt": policy} if policy else {}
+    if cache_kwargs:
+        config["cache"] = cache_kwargs
     return TaskService(
         config_from_mapping(config), executor=executor, start_worker=start_worker
     )
@@ -86,17 +108,76 @@ def test_second_preemption_keeps_counting_rounds():
         service.close()
 
 
-def test_preemption_is_refused_without_safe_point():
-    """默认不对任何任务类型开放抢占：没声明安全点的执行器，运行中的任务不接受抢占。"""
-    service = _running_service(EchoExecutor(sleep_s=5.0))
+def test_preemption_is_refused_when_policy_is_off():
+    """默认台账为空 ⇒ 不对任何任务类型开放抢占，连「可能会导致抢占」的请求都要拒绝。"""
+    service = _running_service(CheckpointExecutor(steps=60, step_sleep_s=0.02), preempt={})
     try:
-        record = service.submit(TaskRequest(kind="echo", payload={"text": "hi"}))
+        record = service.submit(TaskRequest(kind="checkpoint", payload={"steps": 60}))
+        assert _wait_status(service, record.task_id, TaskStatus.RUNNING)
+        with pytest.raises(Exception) as excinfo:
+            service.preempt(record.task_id)
+        assert excinfo.value.code is ErrorCode.CONFLICT
+        assert "抢占未启用" in excinfo.value.message
+        assert service.get(record.task_id).status is TaskStatus.RUNNING
+    finally:
+        service.close()
+
+
+def test_preemption_is_refused_without_safe_point():
+    """执行器自己说了不支持，任务类型登记也没用——准入是「两个都要」不是「任一即可」。"""
+
+    class _NoPreemptExecutor(CheckpointExecutor):
+        @property
+        def supports_preemption(self) -> bool:
+            return False
+
+    service = _running_service(_NoPreemptExecutor(steps=60, step_sleep_s=0.02))
+    try:
+        record = service.submit(TaskRequest(kind="checkpoint", payload={"steps": 60}))
         assert _wait_status(service, record.task_id, TaskStatus.RUNNING)
         with pytest.raises(Exception) as excinfo:
             service.preempt(record.task_id)
         assert excinfo.value.code is ErrorCode.CONFLICT
         assert "安全点" in excinfo.value.message
         assert service.get(record.task_id).status is TaskStatus.RUNNING  # 没有被偷偷暂停
+    finally:
+        service.close()
+
+
+def test_unregistered_kind_is_refused_even_when_executor_declares_safe_point():
+    """G2 门槛：执行器自述支持不算，类型必须已登记并通过恢复测试。"""
+    service = _running_service(CheckpointExecutor(steps=60, step_sleep_s=0.02))
+    try:
+        record = service.submit(TaskRequest(kind="unregistered", payload={"steps": 60}))
+        assert _wait_status(service, record.task_id, TaskStatus.RUNNING)
+        with pytest.raises(Exception) as excinfo:
+            service.preempt(record.task_id)
+        assert excinfo.value.code is ErrorCode.CONFLICT
+        assert "未登记" in excinfo.value.message
+        assert service.get(record.task_id).status is TaskStatus.RUNNING  # 没被偷偷暂停
+    finally:
+        service.close()
+
+
+def test_rounds_exhausted_stops_preemption():
+    """轮次用尽就不再抢：抢占是让重要的先跑，不是让谁永远跑不完。"""
+    policy = dict(PREEMPT_POLICY)
+    policy["max_rounds"] = 1
+    service = _running_service(CheckpointExecutor(steps=60, step_sleep_s=0.02), preempt=policy)
+    try:
+        record = service.submit(TaskRequest(kind="checkpoint", payload={"steps": 60}))
+        assert _wait_status(service, record.task_id, TaskStatus.RUNNING)
+        time.sleep(0.1)
+
+        service.preempt(record.task_id)
+        service.resume(record.task_id)
+        assert _wait_status(service, record.task_id, TaskStatus.RUNNING)
+        time.sleep(0.1)
+
+        with pytest.raises(Exception) as excinfo:
+            service.preempt(record.task_id)
+        assert excinfo.value.code is ErrorCode.CONFLICT
+        assert "max_rounds" in excinfo.value.message
     finally:
         service.close()
 

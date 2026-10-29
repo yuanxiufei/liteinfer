@@ -6,18 +6,23 @@
 3. 客户端重试通过 `client_token` 幂等，不制造重复任务；
 4. 取消区分「已接受取消」与「已完成取消」，且只对声明支持安全点的执行器开放；
 5. 抢占（WBS-3.9）同理：只在执行器声明安全点时才受理，抢占后**先存状态、再还资源**，
-   没有拿到安全点状态就不许说"可续跑"。目前默认不对任何任务类型开放抢占。
+   没有拿到安全点状态就不许说"可续跑"；
+6. 开放抢占的门槛是 G2 的原话：**只对已实现并通过恢复测试的任务类型开放**——
+   执行器自述支持不算，必须在 `preempt.verified_kinds` 登记并写出恢复测试证据。
+   默认台账为空 ⇒ **默认不对任何任务类型开放**。
 """
 
 from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from ..core import (
+    ErrorCode,
     LiteInferConfig,
     LiteInferError,
     ResourceBudget,
@@ -40,9 +45,11 @@ from ..core.models import TaskError
 from ..observability import MetricRegistry, get_logger, log_event
 from .cache import KVCacheBudget, TensorFeatureCache
 from .executor import ExecutionContext, Executor, default_executor
-from .lease import LeaseManager, ResourceMeter
+from .lease import LeaseManager, ResourceLease, ResourceMeter, ResourceSample
+from .meter import CompositeMeter
 from .ports import AdapterInfo, AdapterLookup
-from .scheduler import TaskQueue
+from .preemption import PreemptionPlanner, rounds_of
+from .scheduler import CLASS_ORDER, TaskQueue, classify_kind
 
 
 @dataclass(frozen=True)
@@ -110,6 +117,8 @@ class TaskService:
         self._lease_manager = lease_manager or self._lease_manager_from_quota(
             self._config, meter
         )
+        # 采样器留一份：资源采样要能单独查（WBS-3.4 的三类分别报）
+        self._meter = meter
         self._adapter_lookup = adapter_lookup
         # 两类缓存预算分开（基线 §6.2）：KV 按 token，张量特征按字节，互不挪用
         self._kv_cache = kv_cache or KVCacheBudget(
@@ -127,6 +136,11 @@ class TaskService:
         self._tokens: dict[str, str] = {}
         self._cancel_events: dict[str, threading.Event] = {}
         self._preempt_events: dict[str, threading.Event] = {}
+        #: 抢占台账（WBS-3.9）：有界，谁抢了谁、拿到状态没有，事后必须能追问
+        self._preempt_log: deque[dict[str, Any]] = deque(maxlen=100)
+        self._preemption = PreemptionPlanner(
+            policy=self._config.preempt, class_rank=self._class_rank
+        )
         self._queued_total = 0
         self._queued_by_kind: dict[str, int] = {}
         self._queued_by_tenant: dict[str, int] = {}
@@ -153,6 +167,12 @@ class TaskService:
             meter,
             capacity=ResourceBudget(**quota.usable()),
             borrow_limit=ResourceBudget(**quota.borrow_limit()),
+        )
+
+    def _class_rank(self, kind: str) -> int:
+        """类别次序：推理 0 < 评估 1 < 训练 2，与出队顺序用同一套判定规则。"""
+        return CLASS_ORDER.get(
+            classify_kind(kind, self._config.queue.kind_class), len(CLASS_ORDER)
         )
 
     # ------------------------------------------------------------------ 生命周期
@@ -350,9 +370,32 @@ class TaskService:
         depth["scheduler"] = self._queue.stats()
         return depth
 
+    def resource_sample(self) -> dict[str, Any]:
+        """三类资源分别采样（WBS-3.4）：显存 / 内存 / 磁盘，测不到就 `measured=False`。"""
+        meter = self._meter
+        sample = meter.sample() if meter is not None else ResourceSample(source="declared")
+        if isinstance(meter, CompositeMeter):
+            report = meter.report()
+        else:
+            measured = sample.source not in ("declared", "unavailable")
+            report = {
+                kind: {
+                    "bytes": int(getattr(sample, field)),
+                    "source": sample.source if measured else "unmeasured",
+                    "measured": measured,
+                }
+                for kind, field in (
+                    ("vram", "vram_bytes"),
+                    ("ram", "ram_bytes"),
+                    ("ssd", "ssd_bytes"),
+                )
+            }
+        return {"sample": sample.to_dict(), "resources": report}
+
     def metrics(self) -> dict[str, Any]:
         snapshot = self._metrics.snapshot()
         snapshot["cache"] = self.cache_stats()
+        snapshot["resources"] = self.resource_sample()
         return snapshot
 
     # ------------------------------------------------------------------ 取消 / 恢复
@@ -399,29 +442,34 @@ class TaskService:
 
             raise conflict("当前状态不支持取消", task_id=task_id, status=status.value)
 
-    def preempt(self, task_id: str, *, timeout_s: float = 5.0) -> PreemptAck:
-        """请求抢占：只在执行器声明了安全点时受理，并等到它真的停下。
+    def preempt(
+        self,
+        task_id: str,
+        *,
+        timeout_s: float = 5.0,
+        requester: str | None = None,
+        reason: str = "manual",
+    ) -> PreemptAck:
+        """请求抢占：只在「执行器声明安全点 **且** 该类型已登记通过恢复测试」时受理，
+        并等到它真的停下。
 
         三件事分开报：请求被受理（accepted）、已停在安全点（completed）、
         有没有拿到可恢复状态（checkpoint）。
+        `requester` / `reason` 是台账字段：自动抢占会把「谁发起的」一并记进去。
         """
         record = self.get(task_id)
         if record.is_terminal:
             raise conflict("任务已进入终态，不能抢占", task_id=task_id, status=record.status.value)
-        if not getattr(self._executor, "supports_preemption", False):
-            raise conflict(
-                "该执行器未声明安全点抢占能力，运行中的任务不接受抢占",
-                task_id=task_id,
-                executor=type(self._executor).__name__,
-                hint="抢占只能在声明了安全点的执行器上开放（WBS-3.9）",
-            )
+        self._preempt_gate(record)
 
         with self._lock:
             status = record.status
             if status is TaskStatus.PREEMPTED:
-                return PreemptAck(
+                ack = PreemptAck(
                     task_id, True, True, status, checkpoint=record.preempt is not None
                 )
+                self._record_preemption(record, ack, requester=requester, reason=reason)
+                return ack
             if status not in (TaskStatus.RUNNING, TaskStatus.PREEMPTING):
                 raise conflict("当前状态不支持抢占", task_id=task_id, status=status.value)
             record.preempt_requested = True
@@ -438,12 +486,16 @@ class TaskService:
             current = self.get(task_id).status
             if current is TaskStatus.PREEMPTED:
                 self._metrics.counter("tasks.preempted").inc()
-                return PreemptAck(
+                ack = PreemptAck(
                     task_id, True, True, current, checkpoint=self.get(task_id).preempt is not None
                 )
+                self._record_preemption(record, ack, requester=requester, reason=reason)
+                return ack
             if is_terminal(current):
                 # 执行器在走到安全点之前就跑完了：抢占请求来晚，就如实说没抢到
-                return PreemptAck(task_id, True, False, current, checkpoint=False)
+                ack = PreemptAck(task_id, True, False, current, checkpoint=False)
+                self._record_preemption(record, ack, requester=requester, reason=reason)
+                return ack
             time.sleep(0.01)
         raise timed_out(
             "等待执行器到达安全点超时",
@@ -451,6 +503,81 @@ class TaskService:
             timeout_s=timeout_s,
             status=self.get(task_id).status.value,
         )
+
+    def _preempt_gate(self, record: TaskRecord) -> None:
+        """抢占准入（WBS-3.9 / G2）：四道门槛，缺一不可，拒绝理由必须可读。
+
+        G2 的原话是「只对已实现并通过恢复测试的任务类型开放」，所以光执行器自述
+        支持不够，还要在 `preempt.verified_kinds` 登记（并写出恢复测试证据）；
+        轮次用尽也不再抢占——抢占是为了让更重要的任务先跑，不是为了让谁永远跑不完。
+        """
+        policy = self._config.preempt
+        kind = record.request.kind
+        task_id = record.task_id
+        if not policy.enabled:
+            raise conflict(
+                "抢占未启用，运行中的任务不接受抢占（未对任何任务类型开放安全点抢占）",
+                task_id=task_id,
+                kind=kind,
+                hint="preempt.enabled 默认 false，且默认台账为空；开放前必须登记恢复测试证据",
+            )
+        if not getattr(self._executor, "supports_preemption", False):
+            raise conflict(
+                "该执行器未声明安全点抢占能力，运行中的任务不接受抢占",
+                task_id=task_id,
+                executor=type(self._executor).__name__,
+                hint="抢占只能在声明了安全点的执行器上开放（WBS-3.9）",
+            )
+        if not policy.eligible(kind):
+            raise conflict(
+                f"任务类型 {kind} 未登记为「已实现并通过恢复测试」，不允许抢占",
+                task_id=task_id,
+                kind=kind,
+                verified=sorted(policy.verified_kinds),
+                hint=(
+                    "G2 要求只对通过恢复测试的类型开放；"
+                    "登记时要在 preempt.verification 写取证路径"
+                ),
+            )
+        rounds = rounds_of(record)
+        if rounds >= policy.max_rounds:
+            raise conflict(
+                f"该任务已被抢占 {rounds} 次，达到 max_rounds 上限，不再接受抢占",
+                task_id=task_id,
+                kind=kind,
+                rounds=rounds,
+                max_rounds=policy.max_rounds,
+                hint="抢占也会制造饥饿：轮次用尽的任务必须让它跑完，而不是反复踢它下去",
+            )
+
+    def _record_preemption(
+        self,
+        record: TaskRecord,
+        ack: PreemptAck,
+        *,
+        requester: str | None,
+        reason: str,
+    ) -> None:
+        """抢占台账（有界）：谁抢了谁、在第几轮、有没有真的拿到安全点状态。"""
+        with self._lock:
+            self._preempt_log.append(
+                {
+                    "at": self._clock(),
+                    "victim": record.task_id,
+                    "victim_kind": record.request.kind,
+                    "victim_tenant": record.request.tenant,
+                    "requester": requester,
+                    "reason": reason,
+                    "rounds": rounds_of(record),
+                    "status": ack.status.value,
+                    "checkpoint": ack.checkpoint,
+                }
+            )
+
+    def preemption_log(self) -> list[dict[str, Any]]:
+        """抢占台账快照（有界，最多 100 条）。没有抢占就返回空列表。"""
+        with self._lock:
+            return list(self._preempt_log)
 
     def resume(self, task_id: str) -> TaskRecord:
         """从安全点续跑。没有状态就不许叫"续跑"——那只能重新提交。"""
@@ -545,7 +672,7 @@ class TaskService:
             with self._lock:
                 record.attempts += 1
                 record.transition_to(TaskStatus.RUNNING, reason="dispatch", clock=self._clock)
-            lease = self._lease_manager.acquire(record.task_id, record.request.budget)
+            lease = self._acquire_lease(record)
             with self._lock:
                 record.lease_id = lease.lease_id
 
@@ -599,6 +726,8 @@ class TaskService:
                 self._inflight -= 1
                 self._metrics.gauge("inflight").set(float(self._inflight))
                 self._cancel_events.pop(record.task_id, None)
+            # 资源已经还了，才轮到把它抢过的任务唤醒（顺序反了就是又一次抢不到）
+            self._wake_victims_of(record.task_id)
             log_event(
                 self._logger,
                 "task.finished",
@@ -628,6 +757,76 @@ class TaskService:
             "kv": self._kv_cache.stats().to_dict(),
             "tensor": self._tensor_cache.stats().to_dict(),
         }
+
+    def _acquire_lease(self, record: TaskRecord) -> ResourceLease:
+        """取租约；资源不足且开着自动抢占时，先按策略抢让路任务。
+
+        **只在资源不足（resource_exhausted）时触发**：别的错误（非法配置等）
+        必须原样抛出，不许被抢占逻辑吃掉。
+        """
+        try:
+            return self._lease_manager.acquire(record.task_id, record.request.budget)
+        except LiteInferError as exc:
+            policy = self._config.preempt
+            if not (policy.enabled and policy.auto):
+                raise
+            if exc.code is not ErrorCode.RESOURCE_EXHAUSTED:
+                raise
+            return self._preempt_and_retry(record, exc)
+
+    def _preempt_and_retry(self, record: TaskRecord, original: LiteInferError) -> ResourceLease:
+        """逐个让候选 victim 到安全点，每让一个就重试一次取租约。"""
+        policy = self._config.preempt
+        for candidate in self._preemption.candidates(
+            record.request, self.list_tasks(status=TaskStatus.RUNNING)
+        ):
+            if candidate.task_id == record.task_id:
+                continue  # 不许自己抢自己
+            try:
+                self.preempt(
+                    candidate.task_id,
+                    timeout_s=policy.wait_timeout_s,
+                    requester=record.task_id,
+                    reason=f"auto:{candidate.reason}",
+                )
+            except LiteInferError:
+                continue  # 这个让不了（可能在等待期间已经跑完），换下一个候选
+            try:
+                return self._lease_manager.acquire(record.task_id, record.request.budget)
+            except LiteInferError:
+                continue
+        raise original
+
+    def _wake_victims_of(self, task_id: str) -> None:
+        """谁抢的谁还：请求者跑完释放资源后，唤醒被它抢到安全点的任务。
+
+        没有这一步，自动抢占等于把低优先级任务永久挂起——那不是 QoS，那是丢任务。
+        只恢复**自己抢过的**那些，避免变成无法解释的全队列扫描。
+        """
+        policy = self._config.preempt
+        if not (policy.enabled and policy.auto):
+            return
+        victims = [
+            entry["victim"]
+            for entry in self.preemption_log()
+            if entry["requester"] == task_id and entry.get("checkpoint") is True
+        ]
+        for victim_id in victims:
+            record = self.get(victim_id)
+            if record.status is not TaskStatus.PREEMPTED:
+                continue
+            try:
+                self.resume(victim_id)
+            except LiteInferError:  # noqa: BLE001 - 唤醒失败要留痕，不能拖垮收尾流程
+                log_event(
+                    self._logger,
+                    "preempt.resume_failed",
+                    task_id=victim_id,
+                    requester=task_id,
+                )
+                continue
+            self._metrics.counter("tasks.auto_resumed").inc()
+            log_event(self._logger, "preempt.auto_resumed", task_id=victim_id, requester=task_id)
 
     def _finish_preempted(
         self, record: TaskRecord, exc: TaskPreempted, lease: object | None

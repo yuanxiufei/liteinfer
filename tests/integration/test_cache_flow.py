@@ -8,11 +8,20 @@ import time
 import pytest
 
 from liteinfer.bootstrap import build_service
-from liteinfer.core import ErrorCode, TaskRequest, TaskStatus
+from liteinfer.core import ErrorCode, LiteInferError, TaskRequest, TaskStatus
 from liteinfer.core.config import config_from_mapping
-from liteinfer.runtime import BlockingExecutor, EchoExecutor, TaskService
+from liteinfer.runtime import BlockingExecutor, CompositeMeter, EchoExecutor, TaskService
 
 pytestmark = pytest.mark.integration
+
+
+class _DeadMeter:
+    """永远测不到的采样器：用来验证「没数据」与「测得 0」是两回事。"""
+
+    kind = "vram"
+
+    def sample(self):
+        raise LiteInferError(ErrorCode.UNSUPPORTED, "没有可用的显存采样通路")
 
 
 def _service(**config_kwargs: object) -> TaskService:
@@ -158,7 +167,49 @@ def test_release_evidence_carries_real_meter_sample():
         done = service.wait(record.task_id, timeout_s=5.0)
         assert done.status is TaskStatus.SUCCEEDED
         sample = _reclaim_of(service, record.task_id)["released_sample"]
-        assert "disk_usage" in sample["source"]  # 显存采样待 NVML，故不要求 vram
+        assert "disk_usage" in sample["source"]
         assert sample["ssd_bytes"] > 0
+    finally:
+        service.close()
+
+
+def test_resource_sample_reports_three_kinds_separately():
+    """3.4：三类都能跑——显存 / 内存 / 磁盘各自采样、各报来源，不相加成一个总数。"""
+    service = build_service()
+    try:
+        payload = service.resource_sample()
+        report = payload["resources"]
+        assert set(report) == {"vram", "ram", "ssd"}
+        for info in report.values():
+            assert isinstance(info["measured"], bool)
+            if info["measured"]:
+                assert info["bytes"] > 0
+                assert info["source"] != "unmeasured"
+            else:
+                # 没测到就是没测到：不许拿 0 冒充"测过了"
+                assert info["bytes"] == 0
+                assert info["source"] == "unmeasured"
+
+        # 磁盘这一条在任何机器上都必须测得到（shutil.disk_usage 跨平台）
+        assert report["ssd"]["measured"] is True
+        # 三类不许被相加：整盘已用远大于进程内存，加起来必然暴露
+        sample = payload["sample"]
+        assert sample["ssd_bytes"] > 0
+        assert sample["ssd_bytes"] != sample["ram_bytes"]
+        assert "resources" in service.metrics()
+    finally:
+        service.close()
+
+
+def test_sampling_failure_does_not_break_tasks():
+    """计量拖不垮业务：显存测不到，任务照样跑完，问题记在采样器上。"""
+    service = TaskService(
+        config_from_mapping({}), EchoExecutor(), meter=CompositeMeter([_DeadMeter()])
+    )
+    try:
+        record = service.submit(TaskRequest(kind="echo", payload={"text": "hi"}))
+        assert service.wait(record.task_id, timeout_s=5.0).status is TaskStatus.SUCCEEDED
+        report = service.resource_sample()["resources"]
+        assert report["vram"] == {"bytes": 0, "source": "unmeasured", "measured": False}
     finally:
         service.close()

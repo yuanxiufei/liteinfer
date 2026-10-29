@@ -15,7 +15,12 @@ import pytest
 
 from liteinfer.api import HttpService
 from liteinfer.core import LiteInferConfig, TaskRequest, TaskStatus, config_from_mapping
-from liteinfer.runtime import ExecutionContext, FunctionExecutor, TaskService
+from liteinfer.runtime import (
+    ExecutionContext,
+    FunctionExecutor,
+    TaskService,
+    build_meter,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -122,6 +127,39 @@ def test_backpressure_returns_429_without_buffering():
         assert payload["error"]["code"] == "queue_full"
         assert payload["error"]["retryable"] is True
         assert len(service.list_tasks()) == 1  # 拒绝的任务没有进后台
+    finally:
+        http.stop()
+        service.close()
+
+
+def test_resources_endpoint_reports_three_kinds():
+    """3.4：资源采样接口三类都报，测不到的一类标 measured=False。"""
+    service = TaskService(
+        LiteInferConfig(), FunctionExecutor({"echo": _slow_echo}), meter=build_meter()
+    )
+    http = HttpService(service, port=0)
+    url = http.start()
+    try:
+        status, payload = _get(f"{url}/v1/resources")
+        assert status == 200
+        assert set(payload["resources"]) == {"vram", "ram", "ssd"}
+        assert payload["resources"]["ssd"]["measured"] is True  # 磁盘跨平台必测得到
+        assert payload["sample"]["ssd_bytes"] > 0
+    finally:
+        http.stop()
+        service.close()
+
+
+def test_resources_endpoint_says_unmeasured_when_no_meter():
+    """没配采样器就如实说没测到，不许拿 0 冒充。"""
+    service = TaskService(LiteInferConfig(), FunctionExecutor({"echo": _slow_echo}))
+    http = HttpService(service, port=0)
+    url = http.start()
+    try:
+        _, payload = _get(f"{url}/v1/resources")
+        for info in payload["resources"].values():
+            assert info["measured"] is False
+            assert info["bytes"] == 0
     finally:
         http.stop()
         service.close()

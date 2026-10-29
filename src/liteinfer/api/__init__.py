@@ -11,6 +11,7 @@ from .schemas import (
     health_response,
     parse_status,
     preempt_response,
+    resource_response,
     task_response,
 )
 
@@ -23,6 +24,7 @@ __all__ = [
     "health_response",
     "parse_status",
     "preempt_response",
+    "resource_response",
     "run_server",
     "task_response",
 ]
