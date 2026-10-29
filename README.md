@@ -95,13 +95,18 @@ KV 缓存：cache.kv_tokens 预算；任务在 payload 声明 kv_tokens 才占�
 查：GET /v1/resources 或 liteinfer doctor（三类分开报，测不到标 measured=False）
 ```
 
-安全抢占（WBS-3.9，**目前不对任何任务类型开放**）：
+安全抢占（WBS-3.9，**默认不对任何任务类型开放**）：
 
 ```text
-执行器声明 supports_preemption=True 并在安全点调 context.checkpoint(state) 才受理
+准入四道门槛（缺一即 409）：preempt.enabled → 执行器声明 supports_preemption
+                          → kind 已登记 verified_kinds 并写出 verification 证据
+                          → rounds 没到 max_rounds
 抢占时：先存状态 → 再还资源（租约 + KV 预算）→ 进 PREEMPTED（非终态）
 恢复时：resume() 从断点续跑；没有安全点状态就拒绝，不许"从头重跑说成恢复"
 超时没走到安全点只报 timeout，不杀线程、不打断 CUDA 工作
+自动抢占：preempt.auto=true 时，取租约失败（resource_exhausted）才让路，
+         要求 max_inflight>=2；请求者跑完把自己抢过的任务唤醒续跑
+台账：TaskService.preemption_log()（有界 100 条）——谁抢了谁、第几轮、拿到状态没有
 ```
 
 HTTP 契约（标准库实现，见 [ADR-0002](docs/adr/0002-http-transport-stdlib.md)）：

@@ -159,7 +159,7 @@ transformers `==5.19.0`、`flashinfer_python[cu13]==0.7.2`、Python `>=3.11`；v
 | 3.6 张量特征缓存 | `runtime/cache.py::TensorFeatureCache` | 完成 | 容量上限 + LRU + pin/unpin + 淘汰回调 + 有界淘汰日志；装不下先淘汰自己，剩的都被 pin 住就拒绝并回滚 put |
 | 3.7 资源租约 | `runtime/lease.py`（WBS-1 已有） | 完成 | 本轮新增借用台账 `borrowers()` |
 | 3.8 弹性借用 | `LeaseManager.borrow_limit` + `_excess()` | 完成 | 只借超出部分；借用随租约归还；额度用尽 → 503 |
-| 3.9 安全抢占 | `runtime/executor.py` 的 `supports_preemption` / `checkpoint()` + `service.preempt()` / `resume()` + 状态 `PREEMPTING` / `PREEMPTED` | 完成 | 只在声明安全点的执行器上受理（**默认不对任何任务类型开放**）；抢占先存状态、再还资源（租约 + KV 预算）、后进 PREEMPTED；无状态不许"续跑"；恢复测试已通过。不做强制抢占与自动抢占策略 |
+| 3.9 安全抢占 | `runtime/executor.py` 的 `supports_preemption` / `checkpoint()`、`runtime/preemption.py::PreemptionPlanner`、`core/config.py::PreemptionConfig`、`service.preempt()` / `resume()` / `preemption_log()` + 状态 `PREEMPTING` / `PREEMPTED` | 完成 | 准入四道门槛：`enabled` → 执行器声明 → `verified_kinds` 登记且写了 `verification` 证据 → `rounds < max_rounds`（**默认台账为空 ⇒ 不开放任何类型**）；抢占先存状态、再还资源（租约 + KV 预算）、后进 PREEMPTED；无状态不许"续跑"；`preempt.auto` 时只在 `resource_exhausted` 才让路、要求 `max_inflight>=2`，请求者跑完把抢过的任务唤醒续跑；有界台账 100 条。不做跨进程/跨卡抢占 |
 | 3.10 优先级调度 | `runtime/scheduler.py::TaskQueue` | 完成 | 类别 > 优先级 > FIFO + 租户公平性；`tests/integration/test_scheduling_flow.py` |
 
 口径与边界：[architecture/scheduling-and-quota.md](architecture/scheduling-and-quota.md)。
@@ -175,9 +175,11 @@ transformers `==5.19.0`、`flashinfer_python[cu13]==0.7.2`、Python `>=3.11`；v
 - [ ] 优先级、取消、失败和资源释放状态迁移测试全部通过。（**部分**：优先级、取消 / 失败 /
       资源释放、抢占与恢复均有用例并通过；仍缺「固定负载长跑」与真实后端场景，故不勾）
 - [x] 只对已实现并通过恢复测试的任务类型开放安全抢占。（**当前开放数 = 0**：内置执行器
-      一律声明 `supports_preemption=False`，抢占请求直接 409；链路本身已通过恢复测试——
-      `tests/integration/test_preempt_flow.py` 验证停在安全点后从断点续跑、资源先还。
-      真实后端要通过恢复测试后才能声明 True）
+      一律声明 `supports_preemption=False`，且 `verified_kinds` 默认为空，抢占请求直接 409；
+      链路本身已通过恢复测试——`tests/integration/test_preempt_flow.py` 验证停在安全点后
+      从断点续跑、资源先还；`tests/integration/test_auto_preempt_flow.py` 验证自动抢占后
+      victim 被唤醒并从断点跑完。真实后端必须先通过自己的恢复测试，再登记
+      `verified_kinds` + `verification`，才允许声明 True）
 
 ## Swap 验收要求
 
