@@ -1,0 +1,30 @@
+{
+  "$schema": "liteinfer/benchmark-baseline/v1",
+  "updated_at": "2026-10-28",
+  "status": "empty-pending-wbs0",
+  "policy": "先跑出基线，再据此设定性能目标；不得提前承诺 token/s、每张图秒数或吞吐提升比例。",
+  "thresholds": {
+    "hard": {
+      "test_failure": "阻断",
+      "nan_or_inf": "阻断",
+      "training_divergence": "阻断",
+      "undetected_corrupt_weights": "阻断",
+      "task_state_loss": "阻断",
+      "resource_leak": "阻断",
+      "numeric_error_beyond_tolerance": "阻断",
+      "overload_crash": "阻断"
+    },
+    "soft": {
+      "throughput_drop_pct": 10,
+      "p95_latency_increase_pct": 15,
+      "peak_vram_increase_pct": 5,
+      "cache_hit_rate_drop_points": 10
+    }
+  },
+  "baselines": [],
+  "measurement_requirements": [
+    "固定硬件、模型、精度、输入尺寸与运行配置",
+    "记录 GPU 型号、驱动、软件版本、模型版本与运行配置",
+    "测试噪声较大时多轮重复并做统计判定"
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "$schema": "liteinfer/reference-sources/v1",
+  "updated_at": "2026-10-29",
+  "note": "参考项目，不是依赖；不得 import，不得写入 pyproject.toml",
+  "sources": [
+    {
+      "name": "sglang",
+      "url": "https://github.com/sgl-project/sglang",
+      "branch": "main",
+      "wbs": "WBS-0.2 / WBS-2",
+      "purpose": "推理后端真源：调度、KV 缓存、RadixAttention、取消/抢占语义",
+      "path": "reference/sglang",
+      "commit": "f2d31889258d22214d9541e40b1e1e6961ce95e7",
+      "commit_date": "2026-10-28T17:46:43-07:00",
+      "size_gib": 0.19,
+      "status": "cloned"
+    },
+    {
+      "name": "vllm",
+      "url": "https://github.com/vllm-project/vllm",
+      "branch": "main",
+      "wbs": "WBS-3",
+      "purpose": "对照实现：分页 KV、连续批处理、背压与抢占策略（只读参考，不采用为依赖）",
+      "path": "reference/vllm",
+      "commit": "f5aa164b514819fea7dffa245457f04965cb9309",
+      "commit_date": "2026-10-29T09:12:01+08:00",
+      "size_gib": 0.18,
+      "status": "cloned"
+    },
+    {
+      "name": "peft",
+      "url": "https://github.com/huggingface/peft",
+      "branch": "main",
+      "wbs": "WBS-5",
+      "purpose": "LoRA 训练参考：adapter 注入、权重合并与保存格式",
+      "path": "reference/peft",
+      "commit": "89570547b9c21663acfd06c24f465b73fdbcd419",
+      "commit_date": "2026-10-29T01:31:54+01:00",
+      "size_gib": 0.04,
+      "status": "cloned"
+    },
+    {
+      "name": "diffusers",
+      "url": "https://github.com/huggingface/diffusers",
+      "branch": "main",
+      "wbs": "WBS-6",
+      "purpose": "扩散训练参考：噪声/时间步采样、训练循环与显存优化",
+      "path": "reference/diffusers",
+      "commit": "40e551a4380c0a48333f3eeb032ed7da1f361297",
+      "commit_date": "2026-10-28T17:40:14+01:00",
+      "size_gib": 0.06,
+      "status": "cloned"
+    }
+  ]
+}

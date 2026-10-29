@@ -1,0 +1,29 @@
+# LiteInfer 开发 / 实验编排（骨架）
+#
+# GPU 验收需要 Linux 主机 + NVIDIA Container Toolkit。
+# Windows / WSL2 环境下请先确认 nvidia-smi 能在容器内执行，且该环境已在 docs/adr 中登记为正式验收环境之一。
+
+services:
+  liteinfer:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        PYTHON_IMAGE_TAG: "3.11-slim"
+    image: liteinfer/dev:skeleton
+    command: ["python", "-c", "import liteinfer; print(liteinfer.__version__)"]
+    volumes:
+      - ../:/app
+    environment:
+      PYTHONUNBUFFERED: "1"
+    # GPU 通行在 WBS-0.2 锁定 CUDA 镜像后再启用，请填写固定的 driver capabilities：
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    # Swap 目录挂载必须在宿主机侧确认是真实 NVMe（BusType=Nvme 或 nvme-cli 输出可证），
+    # 仅凭挂载路径包含 nvme 字样不构成证明。
+    # - /mnt/nvme/liteinfer-swap:/mnt/nvme/liteinfer-swap

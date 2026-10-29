@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.coverage
+htmlcov/
+benchmark-results/
+
+# 参考源码：内容不入库（用 deploy/scripts/fetch_references.py 复现），只留说明与锁定文件
+reference/*
+!reference/README.md
+!reference/SOURCES.lock.json

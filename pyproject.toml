@@ -1,0 +1,59 @@
+[project]
+name = "liteinfer"
+version = "0.1.0"
+description = "LiteInfer — 通用训推基础设施（单卡首发，渐进式自研）"
+readme = "README.md"
+requires-python = ">=3.11"
+# 运行时依赖待 WBS-0.2 锁定兼容组合后写入，禁止先装再修：
+# Python / PyTorch / CUDA Runtime / SGLang / Triton 版本以 env/compatibility-matrix.md 为准。
+dependencies = []
+
+[project.scripts]
+liteinfer = "liteinfer.cli.main:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+liteinfer = ["py.typed"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+markers = [
+    "unit: 纯逻辑测试，不需要 GPU",
+    "integration: 进程/服务级集成测试，不需要 GPU",
+    "gpu: 需要真实 GPU 与显存预算",
+    "regression: 数值、显存与性能回归，需要基线数据",
+    "chaos: 故障注入（磁盘满、权重损坏、进程退出、CUDA 错误）",
+]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+# reference/ 是上游源码快照：不参与本仓 lint，且必须挡掉它们的 ruff 配置（含 required-version）
+extend-exclude = ["reference", "benchmarks", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["liteinfer"]
+strict = true
+warn_redundant_casts = true
+warn_unused_ignores = true

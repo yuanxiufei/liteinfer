@@ -1,0 +1,94 @@
+"""核心领域层（WBS-1.2 / 1.3 / 1.7）。
+
+纪律：本层不得直接依赖 SGLang、具体 PyTorch 模型类或 Web 框架；
+后端差异一律通过接口暴露到上层。
+"""
+
+from .config import (
+    LiteInferConfig,
+    ObservabilityConfig,
+    QueueConfig,
+    RuntimeConfig,
+    config_from_mapping,
+)
+from .errors import (
+    DEFAULT_HTTP_STATUS,
+    RETRYABLE,
+    ErrorCode,
+    LiteInferError,
+    TaskCancelled,
+    backend_error,
+    conflict,
+    invalid_argument,
+    not_found,
+    queue_full,
+    resource_exhausted,
+    timed_out,
+    unsupported,
+)
+from .ids import new_id, new_lease_id, new_request_id, new_task_id
+from .models import (
+    AdapterRef,
+    ModelRef,
+    ResourceBudget,
+    StateTransition,
+    TaskError,
+    TaskRecord,
+    TaskRequest,
+    TaskResult,
+    WeightRef,
+    request_from_mapping,
+)
+from .state import (
+    NEEDS_RECOVERY,
+    TERMINAL,
+    TRANSITIONS,
+    TaskStatus,
+    can_transition,
+    ensure_transition,
+    is_terminal,
+    needs_recovery,
+)
+
+__all__ = [
+    "AdapterRef",
+    "DEFAULT_HTTP_STATUS",
+    "ErrorCode",
+    "LiteInferConfig",
+    "LiteInferError",
+    "ModelRef",
+    "NEEDS_RECOVERY",
+    "ObservabilityConfig",
+    "QueueConfig",
+    "RETRYABLE",
+    "ResourceBudget",
+    "RuntimeConfig",
+    "StateTransition",
+    "TERMINAL",
+    "TRANSITIONS",
+    "TaskCancelled",
+    "TaskError",
+    "TaskRecord",
+    "TaskRequest",
+    "TaskResult",
+    "TaskStatus",
+    "WeightRef",
+    "backend_error",
+    "can_transition",
+    "config_from_mapping",
+    "conflict",
+    "ensure_transition",
+    "invalid_argument",
+    "is_terminal",
+    "needs_recovery",
+    "new_id",
+    "new_lease_id",
+    "new_request_id",
+    "new_task_id",
+    "not_found",
+    "queue_full",
+    "request_from_mapping",
+    "resource_exhausted",
+    "timed_out",
+    "unsupported",
+]
