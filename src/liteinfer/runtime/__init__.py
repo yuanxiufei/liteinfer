@@ -19,9 +19,11 @@ from .lease import (
     ResourceSample,
 )
 from .ports import AdapterInfo, AdapterLookup
+from .scheduler import CLASS_ORDER, TaskQueue, classify_kind
 from .service import CancelAck, TaskService
 
 __all__ = [
+    "CLASS_ORDER",
     "AdapterInfo",
     "AdapterLookup",
     "BlockingExecutor",
@@ -35,6 +37,8 @@ __all__ = [
     "ResourceLease",
     "ResourceMeter",
     "ResourceSample",
+    "TaskQueue",
     "TaskService",
+    "classify_kind",
     "default_executor",
 ]

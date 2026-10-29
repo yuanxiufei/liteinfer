@@ -69,6 +69,8 @@ class ResourceLease:
     acquired_sample: ResourceSample
     released_at: float | None = None
     released_sample: ResourceSample | None = None
+    #: 超出基础配额、靠弹性借用拿到的部分（WBS-3.8）。全零表示没借。
+    borrowed: ResourceBudget = field(default_factory=ResourceBudget)
 
     @property
     def active(self) -> bool:
@@ -79,6 +81,7 @@ class ResourceLease:
             "lease_id": self.lease_id,
             "task_id": self.task_id,
             "budget": self.budget.to_dict(),
+            "borrowed": self.borrowed.to_dict(),
             "acquired_at": self.acquired_at,
             "acquired_sample": self.acquired_sample.to_dict(),
             "released_at": self.released_at,
@@ -87,10 +90,31 @@ class ResourceLease:
         }
 
 
-class LeaseManager:
-    """按声明预算记账的租约管理器。
+@dataclass(frozen=True)
+class BorrowRecord:
+    """一次弹性借用的台账条目。借用必须有主，方便追责与回收。"""
 
-    `capacity` 全零表示不设上限（真实上限要等 WBS-3 的实测配额）。
+    lease_id: str
+    task_id: str
+    amount: ResourceBudget
+    at: float
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "lease_id": self.lease_id,
+            "task_id": self.task_id,
+            "amount": self.amount.to_dict(),
+            "at": self.at,
+        }
+
+
+class LeaseManager:
+    """按声明预算记账的租约管理器（WBS-3.3 / 3.8）。
+
+    - `capacity` 全零表示不设上限（真实上限要等 WBS-3 的实测配额）。
+    - `borrow_limit` 是**基础配额之外**的弹性借用额度（WBS-3.8）：
+      只借超出部分，且记入台账 `borrowers()`，谁借的一直可查。
+      未配置借用额度（全零）时，超配额一律拒绝。
     """
 
     def __init__(
@@ -98,30 +122,45 @@ class LeaseManager:
         meter: ResourceMeter | None = None,
         *,
         capacity: ResourceBudget | None = None,
+        borrow_limit: ResourceBudget | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._meter = meter
         self._capacity = capacity or ResourceBudget()
+        self._borrow_limit = borrow_limit or ResourceBudget()
         self._clock = clock
         self._lock = threading.RLock()
         self._leases: dict[str, ResourceLease] = {}
+        self._borrows: dict[str, BorrowRecord] = {}
         self._peak = ResourceBudget()
 
     @property
     def capacity(self) -> ResourceBudget:
         return self._capacity
 
+    @property
+    def borrow_limit(self) -> ResourceBudget:
+        return self._borrow_limit
+
     def acquire(self, task_id: str, budget: ResourceBudget) -> ResourceLease:
         with self._lock:
             outstanding = self.outstanding()
-            if self._exceeds(outstanding, budget):
-                raise resource_exhausted(
-                    "资源预算不足，拒绝新建租约",
-                    task_id=task_id,
-                    requested=budget.to_dict(),
-                    outstanding=outstanding.to_dict(),
-                    capacity=self._capacity.to_dict(),
-                )
+            over = self._excess(outstanding, budget)
+
+            if self._any(over):
+                borrowed = self.borrowed()
+                if not self._fits(borrowed, over, self._borrow_limit):
+                    raise resource_exhausted(
+                        "超出基础配额且没有可借额度，拒绝新建租约",
+                        task_id=task_id,
+                        requested=budget.to_dict(),
+                        outstanding=outstanding.to_dict(),
+                        capacity=self._capacity.to_dict(),
+                        over=over.to_dict(),
+                        borrowed=borrowed.to_dict(),
+                        borrow_limit=self._borrow_limit.to_dict(),
+                    )
+
             sample = self._meter.sample() if self._meter else ResourceSample(source="declared")
             lease = ResourceLease(
                 lease_id=new_lease_id(),
@@ -129,8 +168,16 @@ class LeaseManager:
                 budget=budget,
                 acquired_at=self._clock(),
                 acquired_sample=sample,
+                borrowed=over,
             )
             self._leases[lease.lease_id] = lease
+            if self._any(over):
+                self._borrows[lease.lease_id] = BorrowRecord(
+                    lease_id=lease.lease_id,
+                    task_id=task_id,
+                    amount=over,
+                    at=lease.acquired_at,
+                )
             self._update_peak(outstanding, budget)
             return lease
 
@@ -145,7 +192,22 @@ class LeaseManager:
             lease.released_at = self._clock()
             lease.released_sample = sample
             del self._leases[lease_id]
+            self._borrows.pop(lease_id, None)  # 借来的必须随租约一起还
             return sample
+
+    # ---- 弹性借用台账（WBS-3.8） ----------------------------------------
+    def borrowers(self) -> list[BorrowRecord]:
+        with self._lock:
+            return list(self._borrows.values())
+
+    def borrowed(self) -> ResourceBudget:
+        with self._lock:
+            vram = ram = ssd = 0
+            for record in self._borrows.values():
+                vram += record.amount.vram_bytes
+                ram += record.amount.ram_bytes
+                ssd += record.amount.ssd_bytes
+            return ResourceBudget(vram_bytes=vram, ram_bytes=ram, ssd_bytes=ssd)
 
     def active(self) -> list[ResourceLease]:
         with self._lock:
@@ -183,6 +245,31 @@ class LeaseManager:
             if getattr(outstanding, kind) + getattr(extra, kind) > limit:
                 return True
         return False
+
+    def _excess(self, outstanding: ResourceBudget, extra: ResourceBudget) -> ResourceBudget:
+        """算出「超出基础配额的部分」。只借这部分，不把整个请求算成借用。"""
+        capacity = self._capacity
+        values: dict[str, int] = {}
+        for kind in ("vram_bytes", "ram_bytes", "ssd_bytes"):
+            limit = getattr(capacity, kind)
+            if limit <= 0:
+                values[kind] = 0
+                continue
+            values[kind] = max(
+                0, getattr(outstanding, kind) + getattr(extra, kind) - limit
+            )
+        return ResourceBudget(**values)
+
+    @staticmethod
+    def _any(budget: ResourceBudget) -> bool:
+        return bool(budget.vram_bytes or budget.ram_bytes or budget.ssd_bytes)
+
+    @staticmethod
+    def _fits(used: ResourceBudget, extra: ResourceBudget, limit: ResourceBudget) -> bool:
+        for kind in ("vram_bytes", "ram_bytes", "ssd_bytes"):
+            if getattr(used, kind) + getattr(extra, kind) > getattr(limit, kind):
+                return False
+        return True
 
     def _update_peak(self, outstanding: ResourceBudget, extra: ResourceBudget) -> None:
         self._peak = ResourceBudget(

@@ -13,8 +13,9 @@
 │ SDK 层       client.py（进程内 LiteInfer / session）           │
 ├──────────────────────────────────────────────────────────────┤
 │ 运行时层     runtime/  service（生命周期·队列·背压·取消·回收） │
+│                        scheduler（类别/优先级/公平性出队）      │
 │                        executor（执行器协议）                  │
-│                        lease（资源租约与记账）                 │
+│                        lease（资源租约、配额与弹性借用台账）     │
 ├──────────────────────────────────────────────────────────────┤
 │ 领域层       core/    models / state / config / errors / ids   │
 ├──────────────────────────────────────────────────────────────┤
@@ -25,8 +26,10 @@
 │ 横切         observability/  结构化日志（请求/任务 ID）+ 指标   │
 └──────────────────────────────────────────────────────────────┘
   尚未接入（WBS-3 / 5）：backends/ training/ memory/（双缓存与 Swap）
-                        scheduler/（QoS）
+                        QoS 时延承诺、KV 与张量缓存（3.4–3.6）
 ```
+
+出队顺序与配额口径见 [scheduling-and-quota.md](scheduling-and-quota.md)。
 
 ## 依赖方向（硬纪律）
 
@@ -50,11 +53,13 @@
 | `observability/` | 已实现 | JSON 日志 + request/task ID 关联 + 进程内指标 |
 | `runtime/lease.py` | 已实现 | 逻辑配额记账；**不等于显存硬隔离** |
 | `runtime/executor.py` | 已实现 | 执行器协议 + `echo` 占位执行器 |
-| `runtime/service.py` | 已实现 | 队列上限、背压、幂等、取消两阶段回执、回收 |
+| `runtime/scheduler.py` | 已实现 | 类别 > 优先级 > FIFO 出队 + 租户公平性（WBS-3.10） |
+| `runtime/service.py` | 已实现 | 队列上限、背压、幂等、取消两阶段回执、回收、并发上限 |
 | `client.py` | 已实现 | 进程内 SDK，不依赖 HTTP |
 | `api/` | 已实现 | 标准库 HTTP 服务（见 ADR-0002） |
 | `cli/` | 已实现 | doctor / serve / model list / infer / task * |
 | `adapters/` | 部分实现 | 协议 + 注册中心 + 兼容性检查（WBS-2.1/2.2/2.3）；LLM / SDXL 适配器待依赖锁定 |
+| `core/config.py` | 已实现 | 配置校验，未知键拒绝（不静默忽略）；`queue`/`quota` 段含调度与配额 |
 | `weights/` | 已实现 | 清单校验（损坏绝不判 ok）+ 引用计数生命周期与释放证据（WBS-2.6/2.7） |
 | `bootstrap.py` | 已实现 | 组合根：装配适配器与执行器，注入运行时端口 |
 
@@ -64,3 +69,6 @@
 - **`echo` 执行器不是能力证据**：它不加载任何模型；推理能力要等 LLM / SDXL 适配器接入后才能宣称
   （当前唯一可调用的真实适配器是 `weights.verify`，它只做权重校验，不做推理）。
 - **取消是两阶段**：`accepted`（已接受）与 `completed`（已完成）分开报；只对声明 `supports_cancellation` 的执行器开放运行中的取消。
+- **调度不是 QoS**：优先队列只决定「下一个取谁」，不保证时延，也不抢占已在跑的任务。
+- **配额 0 = 不设限**：真实数字必须来自 WBS-0.2 锁定后的 GPU 实测，未实测前不得填假值。
+- **配置项不许只计数不生效**：`queue.max_inflight` 曾一度不限制并发（缺陷），现在它就是 worker 数。

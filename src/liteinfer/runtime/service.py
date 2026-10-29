@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import queue
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -19,6 +18,7 @@ from typing import Any
 from ..core import (
     LiteInferConfig,
     LiteInferError,
+    ResourceBudget,
     TaskCancelled,
     TaskRecord,
     TaskRequest,
@@ -37,6 +37,7 @@ from ..observability import MetricRegistry, get_logger, log_event
 from .executor import ExecutionContext, Executor, default_executor
 from .lease import LeaseManager
 from .ports import AdapterInfo, AdapterLookup
+from .scheduler import TaskQueue
 
 
 @dataclass(frozen=True)
@@ -73,7 +74,7 @@ class TaskService:
         self._config = config or LiteInferConfig()
         self._config.validate()
         self._executor = executor or default_executor()
-        self._lease_manager = lease_manager or LeaseManager()
+        self._lease_manager = lease_manager or self._lease_manager_from_quota(self._config)
         self._adapter_lookup = adapter_lookup
         self._clock = clock
         self._logger = get_logger("service")
@@ -83,28 +84,47 @@ class TaskService:
         self._records: dict[str, TaskRecord] = {}
         self._tokens: dict[str, str] = {}
         self._cancel_events: dict[str, threading.Event] = {}
-        self._queue: queue.Queue[TaskRecord] = queue.Queue()
         self._queued_total = 0
         self._queued_by_kind: dict[str, int] = {}
         self._queued_by_tenant: dict[str, int] = {}
         self._inflight = 0
         self._closed = False
 
-        self._worker: threading.Thread | None = None
+        # 优先队列（WBS-3.10）：类别 > 显式优先级 > 提交序，带租户公平性限制
+        self._queue = TaskQueue(
+            class_of=self._config.queue.kind_class,
+            fairness_limit=self._config.queue.fairness_limit,
+        )
+        self._stopping = threading.Event()
+        self._workers: list[threading.Thread] = []
         if start_worker:
             self.start()
+
+    @staticmethod
+    def _lease_manager_from_quota(config: LiteInferConfig) -> LeaseManager:
+        """配额来自 `QuotaConfig`：扣掉保留空间后的容量 + 弹性借用上限。"""
+        quota = config.quota
+        return LeaseManager(
+            capacity=ResourceBudget(**quota.usable()),
+            borrow_limit=ResourceBudget(**quota.borrow_limit()),
+        )
 
     # ------------------------------------------------------------------ 生命周期
 
     def start(self) -> None:
+        """启动 worker。`max_inflight` 就是并发上限（= worker 数），不是只计数不生效。"""
         with self._lock:
-            if self._worker is not None and self._worker.is_alive():
+            if any(worker.is_alive() for worker in self._workers):
                 return
             self._closed = False
-            self._worker = threading.Thread(
-                target=self._loop, name="liteinfer-worker", daemon=True
-            )
-            self._worker.start()
+            self._stopping.clear()
+            count = max(1, self._config.queue.max_inflight)
+            for index in range(count):
+                worker = threading.Thread(
+                    target=self._loop, name=f"liteinfer-worker-{index}", daemon=True
+                )
+                self._workers.append(worker)
+                worker.start()
 
     def close(self, *, timeout_s: float = 5.0, mark_unfinished: bool = True) -> None:
         """停止消费并把未终结任务标记为需要恢复（而不是悄悄丢掉）。"""
@@ -112,9 +132,10 @@ class TaskService:
             if self._closed:
                 return
             self._closed = True
-            worker = self._worker
-        if worker is not None:
-            self._queue.put(None)  # type: ignore[arg-type]
+            self._stopping.set()
+            workers = list(self._workers)
+            self._queue.close()
+        for worker in workers:
             worker.join(timeout=timeout_s)
         if mark_unfinished:
             for record in self.unfinished():
@@ -151,7 +172,7 @@ class TaskService:
                 self._queued_by_tenant.get(request.tenant, 0) + 1
             )
             self._cancel_events[record.task_id] = threading.Event()
-            self._queue.put(record)
+            self._queue.push(record)
 
         self._metrics.counter("tasks.submitted").inc()
         self._metrics.gauge("queue.depth").set(float(self._queued_total))
@@ -269,12 +290,14 @@ class TaskService:
 
     def queue_depth(self) -> dict[str, Any]:
         with self._lock:
-            return {
+            depth = {
                 "queued": self._queued_total,
                 "inflight": self._inflight,
                 "by_kind": dict(self._queued_by_kind),
                 "by_tenant": dict(self._queued_by_tenant),
             }
+        depth["scheduler"] = self._queue.stats()
+        return depth
 
     def metrics(self) -> dict[str, Any]:
         return self._metrics.snapshot()
@@ -345,14 +368,14 @@ class TaskService:
     # ------------------------------------------------------------------ 内部
 
     def _loop(self) -> None:
+        poll = self._config.runtime.worker_poll_timeout_s
         while True:
-            item = self._queue.get()
-            if item is None:
-                return
-            try:
-                self._run(item)
-            finally:
-                self._queue.task_done()
+            record = self._queue.pop(timeout=poll)
+            if record is None:
+                if self._stopping.is_set():
+                    return
+                continue
+            self._run(record)
 
     def _run(self, record: TaskRecord) -> None:
         with self._lock:

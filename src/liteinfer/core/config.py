@@ -17,15 +17,21 @@ _T = TypeVar("_T")
 
 @dataclass(frozen=True)
 class QueueConfig:
-    """队列上限（WBS-3.1 的最小形态）。
+    """队列上限与调度（WBS-3.1 / 3.10）。
 
-    排队上限只约束「未开始执行」的任务；运行中的任务数由并发上限约束。
+    排队上限只约束「未开始执行」的任务；运行中的任务数由 `max_inflight` 约束
+    （它就是 worker 数，不是只计数不生效的装饰）。
     """
 
     max_queued: int = 1024
     max_queued_per_kind: int = 256
     max_queued_per_tenant: int = 256
+    #: 并发上限 = worker 线程数。曾一度只被计数、从不限制，那是缺陷不是设计。
     max_inflight: int = 1
+    #: 同一 tenant 连续出队多少个后让位给别人（0 = 不启用公平性限制）
+    fairness_limit: int = 0
+    #: kind → 类别（inference / eval / training）的显式映射，覆盖前缀规则
+    kind_class: dict[str, str] = field(default_factory=dict)
 
     def problems(self) -> list[str]:
         issues: list[str] = []
@@ -33,7 +39,73 @@ class QueueConfig:
             value = getattr(self, name)
             if value < 1:
                 issues.append(f"{name} 必须 >= 1，当前 {value}")
+        if self.fairness_limit < 0:
+            issues.append(f"fairness_limit 不能为负，当前 {self.fairness_limit}")
+        allowed = {"inference", "eval", "training"}
+        for kind, name in self.kind_class.items():
+            if name not in allowed:
+                issues.append(f"kind_class[{kind}] 必须是 {sorted(allowed)} 之一，当前 {name}")
         return issues
+
+
+@dataclass(frozen=True)
+class QuotaConfig:
+    """静态资源配额（WBS-3.3）。
+
+    `0` 一律表示**不设限**，不是"限额为零"：真实配额要等 WBS-0.2 锁定并在 GPU 上实测，
+    未实测前不得填假数字。`reserved_*` 是不可动用的保留空间，从可用容量里扣掉。
+    """
+
+    vram_bytes: int = 0
+    ram_bytes: int = 0
+    ssd_bytes: int = 0
+    reserved_vram_bytes: int = 0
+    reserved_ram_bytes: int = 0
+    reserved_ssd_bytes: int = 0
+    #: 弹性借用上限（WBS-3.8）：只借基础配额之外的部分，且必须记录借用者
+    borrow_vram_bytes: int = 0
+    borrow_ram_bytes: int = 0
+    borrow_ssd_bytes: int = 0
+
+    def problems(self) -> list[str]:
+        issues: list[str] = []
+        for name in (
+            "vram_bytes",
+            "ram_bytes",
+            "ssd_bytes",
+            "reserved_vram_bytes",
+            "reserved_ram_bytes",
+            "reserved_ssd_bytes",
+            "borrow_vram_bytes",
+            "borrow_ram_bytes",
+            "borrow_ssd_bytes",
+        ):
+            if getattr(self, name) < 0:
+                issues.append(f"{name} 不能为负，当前 {getattr(self, name)}")
+        for kind in ("vram", "ram", "ssd"):
+            limit = getattr(self, f"{kind}_bytes")
+            reserved = getattr(self, f"reserved_{kind}_bytes")
+            if limit > 0 and reserved >= limit:
+                issues.append(
+                    f"reserved_{kind}_bytes（{reserved}）必须小于 {kind}_bytes（{limit}），"
+                    f"否则没有可用容量"
+                )
+        return issues
+
+    def usable(self) -> dict[str, int]:
+        """扣掉保留空间后的可用容量；未设限的项返回 0（沿用「0 = 不设限」）。"""
+        result: dict[str, int] = {}
+        for kind in ("vram", "ram", "ssd"):
+            limit = getattr(self, f"{kind}_bytes")
+            reserved = getattr(self, f"reserved_{kind}_bytes")
+            result[f"{kind}_bytes"] = 0 if limit <= 0 else max(0, limit - reserved)
+        return result
+
+    def borrow_limit(self) -> dict[str, int]:
+        return {
+            f"{kind}_bytes": getattr(self, f"borrow_{kind}_bytes")
+            for kind in ("vram", "ram", "ssd")
+        }
 
 
 @dataclass(frozen=True)
@@ -70,6 +142,7 @@ class ObservabilityConfig:
 class LiteInferConfig:
     service_name: str = "liteinfer"
     queue: QueueConfig = field(default_factory=QueueConfig)
+    quota: QuotaConfig = field(default_factory=QuotaConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
@@ -78,6 +151,7 @@ class LiteInferConfig:
         if not self.service_name.strip():
             issues.append("service_name 不能为空")
         issues.extend(self.queue.problems())
+        issues.extend(self.quota.problems())
         issues.extend(self.runtime.problems())
         issues.extend(self.observability.problems())
         return issues
@@ -91,6 +165,7 @@ class LiteInferConfig:
         return {
             "service_name": self.service_name,
             "queue": _as_dict(self.queue),
+            "quota": _as_dict(self.quota),
             "runtime": _as_dict(self.runtime),
             "observability": _as_dict(self.observability),
         }
@@ -119,10 +194,12 @@ def config_from_mapping(data: Mapping[str, Any]) -> LiteInferConfig:
         raise invalid_argument("配置含未知段", unknown=unknown)
 
     queue_raw = data.get("queue") or {}
+    quota_raw = data.get("quota") or {}
     runtime_raw = data.get("runtime") or {}
     observability_raw = data.get("observability") or {}
     for name, raw in (
         ("queue", queue_raw),
+        ("quota", quota_raw),
         ("runtime", runtime_raw),
         ("observability", observability_raw),
     ):
@@ -132,6 +209,7 @@ def config_from_mapping(data: Mapping[str, Any]) -> LiteInferConfig:
     config = LiteInferConfig(
         service_name=str(data.get("service_name") or LiteInferConfig.service_name),
         queue=_build(QueueConfig, queue_raw, section="queue"),
+        quota=_build(QuotaConfig, quota_raw, section="quota"),
         runtime=_build(RuntimeConfig, runtime_raw, section="runtime"),
         observability=_build(ObservabilityConfig, observability_raw, section="observability"),
     )

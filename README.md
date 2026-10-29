@@ -68,6 +68,16 @@ finally:
     service.close()
 ```
 
+调度与配额（WBS-3，见 [scheduling-and-quota.md](docs/architecture/scheduling-and-quota.md)）：
+
+```text
+出队顺序：类别（推理 > 评估 > 训练）> 显式优先级 > 提交先后
+公平性：同一 tenant 连续取走 N 个后让位给别人（queue.fairness_limit，0=关闭）
+配额：quota.{vram,ram,ssd}_bytes + reserved_* 保留空间；0 = 不设限，不是限额为零
+并发：queue.max_inflight = worker 数（不是只计数不生效）
+借用：只借超出基础配额的部分，借用者记入台账，租约释放时归还
+```
+
 HTTP 契约（标准库实现，见 [ADR-0002](docs/adr/0002-http-transport-stdlib.md)）：
 
 ```text
@@ -96,8 +106,8 @@ liteinfer/
 
 | 目录 | 职责 | 阶段 |
 |---|---|---|
-| `core/` | 领域模型、错误码、任务状态、配置校验 | WBS-1（已实现） |
-| `runtime/` | 任务服务、资源租约、执行器协议 | WBS-1（已实现）/ WBS-3 |
+| `core/` | 领域模型、错误码、任务状态、配置校验（含 `queue` / `quota`） | WBS-1/3（已实现） |
+| `runtime/` | 任务服务、优先调度、资源租约与弹性借用、执行器协议 | WBS-1/3（已实现） |
 | `observability/` | 结构化日志、指标注册表 | WBS-1（已实现）/ WBS-3 |
 | `api/` | HTTP 请求与响应（标准库） | WBS-1（已实现） |
 | `cli/` | 命令行 | WBS-1（已实现） |

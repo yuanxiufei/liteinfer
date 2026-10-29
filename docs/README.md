@@ -12,6 +12,8 @@
 - 架构说明：[architecture/](architecture/)
   - [overview.md](architecture/overview.md) — 分层、依赖方向与模块现状
   - [task-lifecycle.md](architecture/task-lifecycle.md) — 状态机、取消两阶段回执、回收记录
+  - [adapters-and-weights.md](architecture/adapters-and-weights.md) — 适配器契约、注册中心、权重校验与释放证据
+  - [scheduling-and-quota.md](architecture/scheduling-and-quota.md) — 出队顺序、静态配额与弹性借用
 - 运维脚本：[runbooks/](runbooks/) — 启动、验收、故障恢复流程
 - 基线数据：[benchmarks/](benchmarks/) — LLM / SDXL / 训练 / Swap 实测报告
 
